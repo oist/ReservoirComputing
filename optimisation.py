@@ -5,8 +5,8 @@ import numpy as np
 from joblib import Parallel, delayed
 from ax.service.ax_client import AxClient
 from ax.service.utils.instantiation import ObjectiveProperties
-import ot
 from numpy.typing import NDArray
+from scipy.sparse.linalg import ArpackNoConvergence
 from esn import ESN, ESNConfig, logger
 from metrics import valid_prediction_time
 from ax.service.utils.instantiation import ObjectiveProperties
@@ -157,10 +157,8 @@ class ESNSearchSpace:
         """
         ax = AxClient(random_seed=seed, verbose_logging=False)
         
-        # Build outcome constraints
         outcome_constraints = []
         if constrain_cle:
-            # Format: "metric_name <= bound"
             outcome_constraints.append(f"max_cle <= {cle_threshold}")
         
         ax.create_experiment(
@@ -363,93 +361,160 @@ class ESNObjective:
     >>> result = objective({"spectral_radius": 0.9})
     >>> print(result)  # {'wasserstein': (median, std)}
     """
-    def __init__(self, data: NDArray, space: ESNSearchSpace, config: EvaluationConfig = EvaluationConfig()):
+    def __init__(self, data: NDArray, space: ESNSearchSpace, config: EvaluationConfig = EvaluationConfig(), seed: int = 42):
         self.config = config
         self.space = space
+        self.seed = seed
         self.data = data.T if data.shape[0] > data.shape[1] else data
         self.D, self.T = self.data.shape
         
-        max_start = self.T - config.warmup_steps - config.predict_steps
-        n_total = config.n_predictions * config.n_instances
-        self.starts = np.random.randint(config.washout, max_start, size=n_total)
+        self._needs_wasserstein = 'wasserstein' in config.metrics or 'max_wasserstein' in config.metrics
+        
+        self.starts = self._get_stratified_starts(
+            n_total=config.n_predictions,
+            low=config.washout,
+            high=self.T - config.warmup_steps - config.predict_steps,
+            seed=seed
+        )
+        
+        if self._needs_wasserstein:
+            self.projections = self._get_projections(
+                self.D, 
+                config.wasserstein_projections, 
+                seed=seed,
+                method='orthogonal'
+            )
+        else:
+            self.projections = None
+        
+        self._precompute_windows()
+    
+    def _get_stratified_starts(self, n_total: int, low: int, high: int, seed: int) -> NDArray:
+        rng = np.random.default_rng(seed)
+        edges = np.linspace(low, high, n_total + 1)
+        starts = np.array([rng.integers(int(edges[i]), int(edges[i + 1])) for i in range(n_total)])
+        rng.shuffle(starts)
+        return starts
+    
+    def _get_projections(self, d: int, n: int, seed: int, method: str = 'orthogonal') -> NDArray:
+        rng = np.random.default_rng(seed)
+        
+        if method == 'orthogonal':
+            blocks = []
+            for _ in range(0, n, d):
+                Z = rng.standard_normal((d, d))
+                Q, _ = np.linalg.qr(Z)
+                blocks.append(Q)
+            return np.hstack(blocks)[:, :n].astype(self.data.dtype)
+        
+        else: 
+            raise ValueError(f"unknown method: {method}")
+    
+    def _precompute_windows(self):
+        cfg = self.config
+        n_windows = len(self.starts)
+        
+        self.warmup_windows = np.empty((n_windows, self.D, cfg.warmup_steps), dtype=self.data.dtype)
+        self.gt_windows = np.empty((n_windows, self.D, cfg.predict_steps), dtype=self.data.dtype)
+        
+        for i, start in enumerate(self.starts):
+            self.warmup_windows[i] = self.data[:, start:start + cfg.warmup_steps]
+            self.gt_windows[i] = self.data[:, start + cfg.warmup_steps:start + cfg.warmup_steps + cfg.predict_steps]
+        
+        if self._needs_wasserstein:
+            self.gt_projected_sorted = np.empty(
+                (n_windows, cfg.predict_steps, cfg.wasserstein_projections),
+                dtype=self.data.dtype
+            )
+            for i in range(n_windows):
+                gt_proj = self.gt_windows[i].T @ self.projections  
+                self.gt_projected_sorted[i] = np.sort(gt_proj, axis=0)
+        else:
+            self.gt_projected_sorted = None
+        
+        logger.debug(f"Precomputed {n_windows} windows")
+    
+    def _compute_wasserstein(self, pred: NDArray, window_idx: int, p: int = 2) -> tuple[float, float]:
+        """Compute max and mean SW using precomputed GT.
+        
+        For equal samples with uniform weights:
+        W_p^p(X, Y) = mean(|sort(X) - sort(Y)|^p)
+        """
+        pred_proj = pred.T @ self.projections  
+        pred_proj_sorted = np.sort(pred_proj, axis=0)
+        
+        diff_p = np.abs(self.gt_projected_sorted[window_idx] - pred_proj_sorted) ** p
+        wasserstein_1d_p = np.mean(diff_p, axis=0) 
+        
+        max_sw = np.max(wasserstein_1d_p) ** (1.0 / p)
+        mean_sw = np.mean(wasserstein_1d_p) ** (1.0 / p)
+        
+        return max_sw, mean_sw
     
     def _eval_instance(self, params: dict, idx: int) -> dict:
-        """evaluate ESN on a single instance.
-        
-        Parameters
-        ----------
-        params : dict
-            Parameters.
-        idx : int
-            Instance index.
+        """Evaluate ESN on a single instance."""
+        try:
+            cfg = self.space.build_config(params, self.D)
+            cfg.seed = idx
             
-        Returns
-        -------
-        dict[str, float]
-            Results with median values for each metric.
-        """
-        cfg = self.space.build_config(params, self.D)
-        cfg.seed = idx
-        
-        esn = ESN(cfg)
-        esn.train(self.data, washout=self.config.washout)
+            esn = ESN(cfg)
+            esn.train(self.data, washout=self.config.washout)
+        except (ArpackNoConvergence, np.linalg.LinAlgError) as e:
+            logger.warning(f"ESN initialization failed for seed {idx}: {e}")
+            return {}  
         
         results = {m: [] for m in self.config.metrics}
+        
         if 'max_cle' in self.config.metrics or self.config.constrain_cle:
             try:
                 max_cle = calculate_max_conditional_lyapunov_exponent(esn, self.data)
-                results['max_cle'] = [max_cle]  # Keep as list for consistency
-            except Exception as e:
+                results['max_cle'] = [max_cle]
+            except (ArpackNoConvergence, np.linalg.LinAlgError, Exception) as e:
                 logger.warning(f"CLE computation failed: {e}")
-                results['max_cle'] = [1.0]  # Penalty value (violates constraint)       
-                
+                results['max_cle'] = [1.0]
+        
         for j in range(self.config.n_predictions):
-            start = self.starts[idx * self.config.n_predictions + j]
-            warmup = self.data[:, start:start + self.config.warmup_steps]
-            pred, _ = esn.predict(warmup, self.config.predict_steps)
-            gt = self.data[:, start + self.config.warmup_steps:start + self.config.warmup_steps + self.config.predict_steps]
-            
-            if 'wasserstein' in results:
-                sw = ot.max_sliced_wasserstein_distance(gt.T, pred.T, n_projections=self.config.wasserstein_projections)
-                results['wasserstein'].append(np.clip(sw, 0, self.config.clip_wasserstein))
-            
-            if 'vpt' in results:
-                results['vpt'].append(valid_prediction_time(gt, pred, self.config.vpt_threshold, self.config.dt))
-            
-        logger.debug(f"Evaluated ESN with parameters {params} on instance {idx} with results {results}")
+            try:
+                warmup = self.warmup_windows[j]
+                pred, _ = esn.predict(warmup, self.config.predict_steps)
+                
+                if self._needs_wasserstein:
+                    sw_max, sw_mean = self._compute_wasserstein(pred, j)
+                    if 'max_wasserstein' in results:
+                        results['max_wasserstein'].append(np.clip(sw_max, 0, self.config.clip_wasserstein))
+                    if 'wasserstein' in results:
+                        results['wasserstein'].append(np.clip(sw_mean, 0, self.config.clip_wasserstein))
+                
+                if 'vpt' in results:
+                    gt = self.gt_windows[j]
+                    results['vpt'].append(valid_prediction_time(gt, pred, self.config.vpt_threshold, self.config.dt))
+            except Exception as e:
+                logger.warning(f"Prediction {j} failed: {e}")
+                continue
+        
         return {k: np.median(v) for k, v in results.items() if v}
     
     def __call__(self, params: dict) -> dict:
-        """evaluate ESN on multiple instances.
-        
-        Parameters
-        ----------
-        params : dict
-            Parameters.
-            
-        Returns
-        -------
-        dict[str, tuple[float, float]]
-            Results with median and standard deviation for each metric.
-        """
-        results = Parallel(n_jobs=self.config.n_jobs)(delayed(self._eval_instance)(params, i) for i in range(self.config.n_instances))
+        """Evaluate ESN on multiple instances."""
+        results = Parallel(n_jobs=self.config.n_jobs)(
+            delayed(self._eval_instance)(params, i) 
+            for i in range(self.config.n_instances)
+        )
         
         valid = [r for r in results if r]
         if not valid:
             logger.warning(f"No valid results for {params}")
             output = {k: (10.0, 0.0) for k in self.config.metrics}
             if self.config.constrain_cle:
-                output['max_cle'] = (1.0, 0.0)  
+                output['max_cle'] = (1.0, 0.0)
             return output
+        
         output = {}
         for k in valid[0]:
             values = [r[k] for r in valid]
-            mean = np.median(values)
-            sem = np.std(values) / np.sqrt(len(values))
-            output[k] = (mean, sem)
+            output[k] = (np.median(values), np.std(values) / np.sqrt(len(values)))
         
-        return output
-    
+        return output    
 
 def _generate_grid(space: ESNSearchSpace, points: dict[str, int | list[float]] | int) -> list[dict]:
     """generate parameter grid from search space.
@@ -488,7 +553,7 @@ def optimize_esn(
     n_trials: int = 30,
     method: Literal["bayesian", "grid"] = "bayesian",
     grid_points: dict[str, int | list[float]] | int = 5,
-) -> tuple[dict, AxClient]:
+) -> tuple[dict, dict, AxClient]:
     """Optimize ESN hyperparameters.
     
     Parameters
@@ -508,8 +573,10 @@ def optimize_esn(
     
     Returns
     -------
-    best_params : dict
-        Best parameters found.
+    best_params_ax : dict
+        Best parameters according to Ax model.
+    best_params_observed : dict
+        Best parameters from actual observations.
     ax : AxClient
         Ax client with all trials.
         
@@ -523,40 +590,52 @@ def optimize_esn(
     ...     .fix(N=500, mode="standard")
     ...     .build())
     >>> config = EvaluationConfig(n_predictions=5, n_instances=3)
-    >>> best_params, ax = optimize_esn(data, space, config, n_trials=30)
+    >>> best_ax, best_obs, ax = optimize_esn(data, space, config, n_trials=30)
     
     Grid search:
     
-    >>> best_params, ax = optimize_esn(
+    >>> best_ax, best_obs, ax = optimize_esn(
     ...     data, space, config,
     ...     method="grid",
     ...     grid_points={"spectral_radius": 10, "alpha": 5}
     ... )
     """
     objective = ESNObjective(data, space, config)
+    if 'max_wasserstein' in config.metrics:
+        objective_name = 'max_wasserstein'
+    elif 'wasserstein' in config.metrics:
+        objective_name = 'wasserstein'
+    elif 'vpt' in config.metrics:
+        objective_name = 'vpt'
+    else:
+        objective_name = config.metrics[0]
     ax = space.create_ax_client(
+        objective_name=objective_name,
         constrain_cle=config.constrain_cle,
         cle_threshold=config.cle_threshold,
     )
+    
+    best_val = float('inf')
+    best_params_observed = None
+    
     if method == "grid":
         grid = _generate_grid(space, grid_points)
         logger.debug(f"Grid search: {len(grid)} combinations")
         
-        best_val = float('inf')
         for i, params in enumerate(grid):
             _, idx = ax.attach_trial(params)
             result = objective(params)
             ax.complete_trial(idx, raw_data=result)
             
-            val = result["wasserstein"][0]
+            val = result[config.metrics[0]][0]
             if val < best_val:
                 best_val = val
+                best_params_observed = params.copy()
             
             if (i + 1) % 10 == 0 or i == len(grid) - 1:
                 logger.debug(f"[{i+1}/{len(grid)}] best={best_val:.4f}")
     
-    else:  # bayesian
-        best_val = float('inf')
+    else:  
         for i in range(n_trials):
             params, idx = ax.get_next_trial()
             print(params)
@@ -564,10 +643,11 @@ def optimize_esn(
             print(result)
             ax.complete_trial(idx, raw_data=result)
             
-            val = result["wasserstein"][0]
+            val = result[config.metrics[0]][0]
             if val < best_val:
                 best_val = val
+                best_params_observed = params.copy()
             logger.debug(f"trial {i+1}: {val:.4f} (best={best_val:.4f})")
     
-    best_params, _ = ax.get_best_parameters()
-    return best_params, ax
+    best_params_ax, _ = ax.get_best_parameters()
+    return best_params_ax, best_params_observed, ax
