@@ -1,3 +1,23 @@
 # pixi environments
 .pixi/*
 !.pixi/config.toml
+
+# IDE
+.idea/
+.vscode/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+
+# Logs
+*.log
