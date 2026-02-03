@@ -1,33 +1,9 @@
 [project]
-name = "reservoir-esn"
+name = "rc"
 version = "0.1.0"
 description = "Echo State Network (ESN) library for reservoir computing"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
-keywords = [
-    "reservoir-computing",
-    "echo-state-network",
-    "esn",
-    "machine-learning",
-    "time-series",
-    "dynamical-systems",
-    "chaos",
-    "lyapunov",
-]
-classifiers = [
-    "Development Status :: 4 - Beta",
-    "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Topic :: Scientific/Engineering :: Physics",
-    "Typing :: Typed",
-]
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
@@ -36,6 +12,7 @@ dependencies = [
     "joblib>=1.2",
     "ax-platform>=0.3",
     "numba>=0.57",
+    "tqdm>=4.65",
 ]
 
 [project.optional-dependencies]
@@ -44,21 +21,23 @@ dev = [
     "matplotlib",
     "plotly",
 ]
-test = [
-    "pytest>=7.0",
-    "pytest-cov>=4.0",
-]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tool.pixi.pypi-dependencies]
+rc = { path = ".", editable = true }
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+dev = { features = ["dev"], solve-group = "default" }
+
+[tool.pixi.tasks]
+
 [tool.hatch.build.targets.wheel]
-packages = ["rc"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_functions = ["test_*"]
-addopts = "-v --tb=short"
-
+packages = ["esn"]
