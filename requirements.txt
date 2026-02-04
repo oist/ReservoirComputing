@@ -5,4 +5,3 @@ POT>=0.9
 joblib>=1.2
 ax-platform>=0.3
 numba>=0.57
-tqdm>=4.65
