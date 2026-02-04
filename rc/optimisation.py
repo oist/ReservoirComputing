@@ -8,9 +8,38 @@ from ax.service.utils.instantiation import ObjectiveProperties
 from numpy.typing import NDArray
 from scipy.sparse.linalg import ArpackNoConvergence
 from rc.esn import ESN, ESNConfig, logger
-from rc.metrics import valid_prediction_time
 from ax.service.utils.instantiation import ObjectiveProperties
 import time
+
+def valid_prediction_time(true_data, predictions, threshold=0.4, dt=0.01):
+    """
+    Compute valid prediction time before trajectory diverges.
+    
+    Parameters
+    ----------
+    true_data : ndarray of shape (D, T)
+        Ground truth trajectory.
+    predictions : ndarray of shape (D, T)
+        Predicted trajectory.
+    threshold : float, default=0.4
+        Normalized squared error threshold for divergence.
+    dt : float, default=0.01
+        Time step for converting steps to time.
+    
+    Returns
+    -------
+    vpt : float
+        Valid prediction time in time units.
+    """
+    variance = np.var(np.sum(true_data, axis=0))
+    squared_diff = np.sum((true_data - predictions)**2, axis=0)
+    normalized_error = squared_diff / variance
+    
+    divergence_idx = np.where(normalized_error > threshold)[0]
+    valid_steps = divergence_idx[0] if len(divergence_idx) > 0 else len(normalized_error)
+    
+    return valid_steps * dt
+
 def calculate_max_conditional_lyapunov_exponent(esn: ESN, data: NDArray, dt: float, length: int) -> float:
     """calculate the max conditional Lyapunov exponent of the ESN.
     
