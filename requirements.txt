@@ -4,4 +4,3 @@ scikit-learn>=1.2
 POT>=0.9
 joblib>=1.2
 ax-platform>=0.3
-numba>=0.57

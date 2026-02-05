@@ -41,7 +41,6 @@ from rc.esn import (
     analyse_dynamics,
     logger,
 )
-from rc.metrics import valid_prediction_time
 from rc.optimisation import (
     ESNSearchSpace,
     ESNSearchSpaceBuilder,
@@ -50,6 +49,7 @@ from rc.optimisation import (
     SearchParam,
     optimize_esn,
     calculate_max_conditional_lyapunov_exponent,
+    valid_prediction_time,
 )
 
 __version__ = "0.1.0"
