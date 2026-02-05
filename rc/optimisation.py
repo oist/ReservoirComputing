@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from itertools import product
 from typing import Any, ClassVar, Literal
 import numpy as np
@@ -150,8 +150,8 @@ class ESNSearchSpace:
     optimize: dict[str, SearchParam]
     fixed: dict[str, Any]
     
-    _valid_optimizable: ClassVar[set[str]] = {"N", "spectral_radius", "alpha", "input_scaling", "sparsity", "bias_scaling", "leaky_rate", "beta", "scale", "weights_generation_strategy", "bias_generation_strategy", "input_generation_strategy", "self_connections"}
-    _valid_fixed: ClassVar[set[str]] = _valid_optimizable | {"mode", "seed", "input_dim"}
+    _valid_optimizable = {f.name for f in fields(ESNConfig)}
+    _valid_fixed = _valid_optimizable | {"mode", "seed", "input_dim"}
     
     def __post_init__(self):
         unknown_opt = set(self.optimize) - self._valid_optimizable
