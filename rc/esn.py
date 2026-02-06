@@ -45,7 +45,7 @@ def participation_ratio(explained_variance: NDArray) -> float:
     
     return np.sum(explained_variance)**2 / sum_sq
 
-def analyse_dynamics(rc_trajectory: NDArray) -> dict:
+def analyse_dynamics(rc_trajectory: NDArray, pca_components: int = 0.95) -> dict:
     """analyse the dynamics of the reservoir trajectory
     
     Parameters
@@ -72,7 +72,7 @@ def analyse_dynamics(rc_trajectory: NDArray) -> dict:
         raise ValueError(f"rc_trajectory must have at least 2 timesteps for PCA, got {rc_trajectory.shape[1]}")
     
     # do pca on the trajectory
-    pca = PCA(n_components=0.95)
+    pca = PCA(n_components=pca_components)
     pca.fit(rc_trajectory.T)
     pca_scores = pca.transform(rc_trajectory.T)
     explained_variance = pca.explained_variance_ratio_
