@@ -48,3 +48,5 @@ Thumbs.db
 .venv
 env/
 venv/
+# Results data
+results_data/s.npy
