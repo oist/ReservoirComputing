@@ -10,7 +10,7 @@ import h5py
 from sklearn.preprocessing import StandardScaler
 from joblib import Parallel, delayed
 
-ROOT = Path("/Users/iliasoroka/RC_esn")
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from rc import ESN
 

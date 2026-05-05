@@ -4,11 +4,11 @@ Echo State Network library for reservoir computing.
 
 ## Install
 
-With [uv](https://docs.astral.sh/uv/) (recommended):
+With uv (recommended):
 
 ```bash
-git clone https://github.com/oist/RC_esn.git
-cd RC_esn
+git clone https://github.com/oist/ReservoirComputing.git
+cd ReservoirComputing
 uv sync                 # runtime deps
 uv sync --extra dev     # + jupyter/matplotlib/plotly
 ```
