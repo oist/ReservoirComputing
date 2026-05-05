@@ -1,7 +1,7 @@
 [project]
 name = "rc"
 version = "0.1.0"
-description = "Echo State Network (ESN) library for reservoir computing"
+description = "Library for reservoir computing"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -30,7 +30,6 @@ dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
     "scikit-learn>=1.2",
-    "POT>=0.9",
     "joblib>=1.2",
     "ax-platform>=0.3",
 ]
@@ -40,6 +39,11 @@ dev = [
     "jupyter",
     "matplotlib",
     "plotly",
+    "POT>=0.9",
+]
+docs = [
+    "mkdocs-material",
+    "mkdocstrings[python]",
 ]
 
 [build-system]
@@ -48,15 +52,4 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["rc"]
-
-[tool.pixi.workspace]
-channels = ["conda-forge"]
-platforms = ["osx-arm64"]
-
-[tool.pixi.pypi-dependencies]
-rc = { path = ".", editable = true }
-
-[tool.pixi.environments]
-default = { solve-group = "default" }
-dev = { features = ["dev"], solve-group = "default" }
 

@@ -4,6 +4,17 @@ Echo State Network library for reservoir computing.
 
 ## Install
 
+With [uv](https://docs.astral.sh/uv/) (recommended — uses the pinned `uv.lock`):
+
+```bash
+git clone https://github.com/oist/RC_esn.git
+cd RC_esn
+uv sync                 # install runtime deps
+uv sync --extra dev     # add jupyter/matplotlib/plotly for the notebooks
+```
+
+Or with pip into an existing environment:
+
 ```bash
 pip install -e .
 ```
@@ -28,6 +39,10 @@ from rc import ESNSearchSpaceBuilder, EvaluationConfig, optimize_esn
 space = ESNSearchSpaceBuilder().optimize("spectral_radius").optimize("alpha").fix(N=500).build()
 config = EvaluationConfig(washout=2000, predict_steps=5000, n_predictions=4)
 best_params, _, ax = optimize_esn(data, space, config, n_trials=20)
+final_config = space.build_config(best_params, input_dim=data.shape[0])
+esn = ESN(final_config)
+esn.train(data, washout=2000)
+predictions, states = esn.predict(warmup, steps=1000)
 ```
 
 ## Full Configuration
