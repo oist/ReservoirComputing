@@ -1,87 +1,30 @@
 from __future__ import annotations
+from pickle import TRUE
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy.sparse import random as sparse_random, csr_matrix
-from scipy.sparse.linalg import eigs as sparse_eigs
+from scipy.sparse.linalg import eigs as sparse_eigs, ArpackNoConvergence
 from scipy.linalg import cho_factor, cho_solve
 from sklearn.linear_model import Ridge
 from dataclasses import dataclass, field
-from typing import Protocol, Callable, Literal, runtime_checkable
+from typing import Callable, Literal
 from scipy.stats import ortho_group
-import ot
-from sklearn.decomposition import PCA
+import json
 import logging
+import os
+from joblib import Parallel, delayed
+
+from rc.dynamics import (
+    ReservoirDynamics,
+    StandardDynamics,
+    LeakyDynamics,
+    ES2NDynamics,
+    create_dynamics,
+)
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
-
-  
-
-def participation_ratio(explained_variance: NDArray) -> float:
-    """calculate the participation ratio of the pca scores
-    
-    Parameters
-    ----------
-    explained_variance : array-like
-        Explained variance of the PCA components.
-        
-    Returns
-    -------
-    participation_ratio : float
-        Participation ratio of the PCA components.
-    """
-    explained_variance = np.asarray(explained_variance)
-    if explained_variance.ndim != 1:
-        raise ValueError(f"explained_variance must be 1D array, got shape {explained_variance.shape}")
-    if len(explained_variance) == 0:
-        raise ValueError("explained_variance cannot be empty")
-    if np.any(explained_variance < 0):
-        raise ValueError("explained_variance values must be non-negative")
-    
-    sum_sq = np.sum(explained_variance**2)
-    if sum_sq == 0:
-        raise ValueError("explained_variance cannot be all zeros")
-    
-    return np.sum(explained_variance)**2 / sum_sq
-
-def analyse_dynamics(rc_trajectory: NDArray, pca_components: int = 0.95) -> dict:
-    """analyse the dynamics of the reservoir trajectory
-    
-    Parameters
-    ----------
-    rc_trajectory : array-like
-        Reservoir trajectory of shape (N, T) where N is reservoir size and T is timesteps.
-        
-    Returns
-    -------
-    dict with keys: 'effective_dim', 'explained_variance', 'pca_scores'
-        'effective_dim' : float
-            Effective dimension (Participation Ratio) of the reservoir trajectory.
-        'explained_variance' : array-like
-            Explained variance of the PCA components.
-        'pca_scores' : array-like
-            PCA scores of the reservoir trajectory.
-    """
-    rc_trajectory = np.asarray(rc_trajectory)
-    if rc_trajectory.ndim != 2:
-        raise ValueError(f"rc_trajectory must be 2D array of shape (N, T), got shape {rc_trajectory.shape}")
-    if rc_trajectory.shape[0] == 0 or rc_trajectory.shape[1] == 0:
-        raise ValueError(f"rc_trajectory cannot have zero-length dimensions, got shape {rc_trajectory.shape}")
-    if rc_trajectory.shape[1] < 2:
-        raise ValueError(f"rc_trajectory must have at least 2 timesteps for PCA, got {rc_trajectory.shape[1]}")
-    
-    # do pca on the trajectory
-    pca = PCA(n_components=pca_components)
-    pca.fit(rc_trajectory.T)
-    pca_scores = pca.transform(rc_trajectory.T)
-    explained_variance = pca.explained_variance_ratio_
-    effective_dim = participation_ratio(explained_variance)
-    return {
-        'effective_dim': effective_dim,
-        'explained_variance': explained_variance,
-        'pca_scores': pca_scores,
-    }
 
 
 @dataclass
@@ -176,316 +119,6 @@ class ESNConfig:
         if self.mode not in valid_modes:
             raise ValueError(f"mode must be one of {valid_modes}, got '{self.mode}'")
 
-@runtime_checkable
-class ReservoirDynamics(Protocol):
-    """protocol for reservoir update dynamics"""
-    
-    def update(self, r: NDArray, z: NDArray, activation: Callable[[NDArray], NDArray]) -> NDArray:
-        """compute new reservoir state
-        
-        Parameters
-        ----------
-        r : ndarray of shape (N,)
-            Current reservoir state.
-        z : ndarray of shape (N,)
-            Pre-activation: Wr @ r + Wx @ x + b
-        activation : callable
-            Activation function.
-            
-        Returns
-        -------
-        r_new : ndarray of shape (N,)
-            Updated reservoir state.
-        """
-        ...
-    
-    def jacobian_update(self, delta: NDArray, r: NDArray, z: NDArray, Wr: NDArray, WxWout: NDArray) -> tuple[NDArray, NDArray]:
-        """Propagate tangent vectors for Lyapunov computation.
-        
-        Parameters
-        ----------
-        delta : ndarray of shape (N, k)
-            Tangent vectors to propagate.
-        r : ndarray of shape (N,)
-            Current reservoir state.
-        z : ndarray of shape (N,)
-            Pre-activation values.
-        Wr : ndarray of shape (N, N)
-            Reservoir weight matrix.
-        Wx : ndarray of shape (N, input_dim)
-            Input weight matrix.
-        Wout : ndarray of shape (input_dim, N)
-            Output weight matrix (without bias).
-            
-        Returns
-        -------
-        delta_new : ndarray of shape (N, k)
-            Updated tangent vectors.
-        r_new : ndarray of shape (N,)
-            Updated reservoir state.
-        """
-        ...
-    
-    def get_params(self) -> dict:
-        """return mode-specific parameters for serialization"""
-        ...
-    
-    @classmethod
-    def from_params(cls, params: dict) -> "ReservoirDynamics":
-        """reconstruct from serialized parameters"""
-        ...
-        
-    def conditional_jacobian_update(self, delta: NDArray, r: NDArray, z: NDArray, Wr: NDArray) -> tuple[NDArray, NDArray]:
-        """Propagate tangent vectors for conditional Lyapunov computation.
-        
-        Unlike jacobian_update, this does NOT include output feedback (Wout),
-        as the system is being driven by external data.
-        """
-        ...
-    
-    def conditional_jacobian_update_vector(self, g: NDArray, z: NDArray, Wr: NDArray) -> NDArray:
-        """Propagate tangent vectors for conditional max CLE computation.
-        """
-        ...
-
-
-class StandardDynamics:
-    """standard ESN dynamics: r = tanh(Wr @ r + Wx @ x + b)
-    
-    Examples
-    --------
-    >>> from rc.esn import StandardDynamics, create_dynamics
-    >>> dynamics = StandardDynamics()
-    >>> dynamics = create_dynamics("standard", N=100)
-    """
-    __slots__ = ()
-    def update(self, r: NDArray, z: NDArray, activation: Callable[[NDArray], NDArray]) -> NDArray: return activation(z)
-    
-    def jacobian_update(self, delta: NDArray, r: NDArray, z: NDArray, Wr: NDArray, WxWout: NDArray) -> tuple[NDArray, NDArray]:
-        s = np.tanh(z)
-        D = 1.0 - s**2
-        J_delta = Wr @ delta + (WxWout @ delta)
-        delta_new = D[:, np.newaxis] * J_delta
-        return delta_new, s
-    
-    def get_params(self) -> dict: return {"mode": "standard"}
-    
-    @classmethod
-    def from_params(cls, params: dict) -> "StandardDynamics": return cls()
-    
-    def conditional_jacobian_update(self, delta: NDArray, r: NDArray, z: NDArray, Wr: NDArray) -> tuple[NDArray, NDArray]:
-        """jacobian for driven dynamics."""
-        s = np.tanh(z)
-        D = 1.0 - s**2
-        delta_new = D[:, np.newaxis] * (Wr @ delta)
-        return delta_new, s
-    
-    def conditional_jacobian_update_vector(self, g: NDArray, z: NDArray, Wr) -> NDArray:
-        D = 1.0 - np.tanh(z)**2
-        Wr_g = Wr.dot(g) if hasattr(Wr, 'dot') else Wr @ g
-        return D * Wr_g
-
-@dataclass
-class LeakyDynamics:
-    """leaky integrator ESN dynamics
-    
-    r = (1 - leak) * r + leak * tanh(Wr @ r + Wx @ x + b)
-    
-    Parameters
-    ----------
-    leaky_rate : ndarray of shape (N,)
-        Per-neuron leaky integration rates. Values should be in (0, 1].
-        
-    Examples
-    --------
-    Create with uniform leak rate for all neurons:
-    
-    >>> import numpy as np
-    >>> from rc.esn import LeakyDynamics, create_dynamics
-    >>> N = 100
-    >>> dynamics = LeakyDynamics(leaky_rate=np.full(N, 0.3))
-    
-    Create with per-neuron random leak rates:
-    
-    >>> dynamics = LeakyDynamics(leaky_rate=np.random.uniform(0.1, 0.5, N))
-    
-    Use via create_dynamics helper:
-    
-    >>> rng = np.random.default_rng(42)
-    >>> dynamics = create_dynamics("leaky", N=100, leaky_rate=0.2, rng=rng)
-    """
-    __slots__ = ('leaky_rate', 'keep_rate')
-    leaky_rate: NDArray
-    
-    def __post_init__(self): self.keep_rate = 1.0 - self.leaky_rate
-    
-    def update(self, r: NDArray, z: NDArray, activation: Callable[[NDArray], NDArray]) -> NDArray: return self.keep_rate * r + self.leaky_rate * activation(z)
-    
-    def jacobian_update(self, delta: NDArray, r: NDArray, z: NDArray, Wr: NDArray, WxWout: NDArray) -> tuple[NDArray, NDArray]:
-        s = np.tanh(z)
-        D = 1.0 - s**2
-        J_delta = Wr @ delta + (WxWout @ delta)
-        delta_new = (self.keep_rate[:, np.newaxis] * delta + self.leaky_rate[:, np.newaxis] * (D[:, np.newaxis] * J_delta))
-        r_new = self.keep_rate * r + self.leaky_rate * s
-        return delta_new, r_new
-    
-    def get_params(self) -> dict: return {"mode": "leaky", "leaky_rate": self.leaky_rate}
-    
-    @classmethod
-    def from_params(cls, params: dict) -> "LeakyDynamics": return cls(leaky_rate=params["leaky_rate"])
-
-    def conditional_jacobian_update(self, delta: NDArray, r: NDArray, z: NDArray, Wr: NDArray) -> tuple[NDArray, NDArray]:
-        """jacobian for driven dynamics."""
-        s = np.tanh(z)
-        D = 1.0 - s**2
-        delta_new = (self.keep_rate[:, np.newaxis] * delta + self.leaky_rate[:, np.newaxis] * (D[:, np.newaxis] * (Wr @ delta)))
-        r_new = self.keep_rate * r + self.leaky_rate * s
-        return delta_new, r_new
-    
-    def conditional_jacobian_update_vector(self, g: NDArray, z: NDArray, Wr) -> NDArray:
-        D = 1.0 - np.tanh(z)**2
-        Wr_g = Wr.dot(g) if hasattr(Wr, 'dot') else Wr @ g
-        return self.keep_rate * g + self.leaky_rate * (D * Wr_g)
-@dataclass 
-class ES2NDynamics:
-    """ES2N dynamics with orthogonal mixing.
-    
-    r = beta * tanh(z) + (1 - beta) * (O @ r)
-    
-    Parameters
-    ----------
-    beta : ndarray of shape (N,)
-        Per-neuron nonlinearity mixing parameter. Values should be in (0, 1].
-    O : ndarray of shape (N, N)
-        Orthogonal transformation matrix.
-        
-    Examples
-    --------
-    Create with uniform beta and random orthogonal matrix:
-    
-    >>> import numpy as np
-    >>> from scipy.stats import ortho_group
-    >>> from rc.esn import ES2NDynamics, create_dynamics
-    >>> N = 100
-    >>> O = ortho_group.rvs(N)
-    >>> dynamics = ES2NDynamics(beta=np.full(N, 0.5), O=O)
-    
-    Use via create_dynamics helper (recommended):
-    
-    >>> rng = np.random.default_rng(42)
-    >>> dynamics = create_dynamics("es2n", N=100, beta=0.5, rng=rng)
-    """
-    __slots__ = ('beta', 'O', 'keep_rate')
-    beta: NDArray
-    O: NDArray
-    
-    def __post_init__(self): self.keep_rate = 1.0 - self.beta
-    
-    def update(self, r: NDArray, z: NDArray, activation: Callable[[NDArray], NDArray]) -> NDArray: return self.beta * activation(z) + self.keep_rate * (self.O @ r)
-    
-    def jacobian_update(self, delta: NDArray, r: NDArray, z: NDArray, Wr: NDArray, WxWout: NDArray) -> tuple[NDArray, NDArray]:
-        s = np.tanh(z)
-        D = 1.0 - s**2
-        J_delta = Wr @ delta + (WxWout @ delta)
-        nonlin_term = self.beta[:, np.newaxis] * (D[:, np.newaxis] * J_delta)
-        lin_term = self.keep_rate[:, np.newaxis] * (self.O @ delta)
-        delta_new = nonlin_term + lin_term
-        r_new = self.beta * s + self.keep_rate * (self.O @ r)
-        return delta_new, r_new
-    
-    def get_params(self) -> dict: return {"mode": "es2n", "beta": self.beta, "O": self.O}
-    
-    @classmethod
-    def from_params(cls, params: dict) -> "ES2NDynamics": return cls(beta=params["beta"], O=params["O"])
-    
-    def conditional_jacobian_update_vector(self, g: NDArray, z: NDArray, Wr) -> NDArray:
-        D = 1.0 - np.tanh(z)**2
-        Wr_g = Wr.dot(g) if hasattr(Wr, 'dot') else Wr @ g
-        return self.beta * (D * Wr_g) + self.keep_rate * (self.O @ g)
-    
-def create_dynamics(mode: Literal["standard", "leaky", "leakyrand", "es2n", "es2nrand"] | str, N: int, dtype: np.dtype = np.float64, 
-                  leaky_rate: float | NDArray = 0.1, beta: float | NDArray = 0.5, scale: float = 0.1, rng: np.random.Generator = None) -> ReservoirDynamics:
-    """function to create reservoir dynamics
-    
-    Parameters
-    ----------
-    mode : str
-        Dynamics mode: 'standard', 'leaky', 'leakyrand', 'es2n', 'es2nrand'.
-    N : int
-        Number of reservoir neurons.
-    dtype : np.dtype
-        Data type for arrays.
-    leaky_rate : float or array-like
-        Leaky rate for leaky modes.
-    beta : float or array-like
-        Beta parameter for ES2N modes.
-    scale : float
-        Scale for random parameter sampling.
-    rng : np.random.Generator or None
-        Random number generator.
-        
-    Returns
-    -------
-    dynamics : ReservoirDynamics
-        Configured dynamics instance.
-    """
-    # validate N
-    if not isinstance(N, (int, np.integer)) or N <= 0:
-        raise ValueError(f"N must be a positive integer, got {N}")
-    
-    # validate scale
-    if not isinstance(scale, (int, float)) or scale < 0:
-        raise ValueError(f"scale must be non-negative, got {scale}")
-    
-    # validate rng for modes that need it
-    if mode in ("leakyrand", "es2nrand", "es2n") and rng is None:
-        raise ValueError(f"rng (random number generator) is required for mode '{mode}'")
-    
-    if mode == "standard": 
-        return StandardDynamics()
-    elif mode == "leaky":
-        # validate leaky_rate
-        if np.isscalar(leaky_rate):
-            if not (0 < leaky_rate <= 1):
-                raise ValueError(f"leaky_rate must be in (0, 1], got {leaky_rate}")
-            lr = np.full(N, leaky_rate, dtype=dtype)
-        else:
-            lr = np.asarray(leaky_rate, dtype=dtype)
-            if lr.shape != (N,):
-                raise ValueError(f"leaky_rate array must have shape ({N},), got {lr.shape}")
-            if np.any(lr <= 0) or np.any(lr > 1):
-                raise ValueError("all leaky_rate values must be in (0, 1]")
-        return LeakyDynamics(leaky_rate=np.clip(lr, 0, 1))
-    elif mode == "es2n":
-        # validate beta
-        if np.isscalar(beta):
-            if not (0 < beta <= 1):
-                raise ValueError(f"beta must be in (0, 1], got {beta}")
-            b = np.full(N, beta, dtype=dtype)
-        else:
-            b = np.asarray(beta, dtype=dtype)
-            if b.shape != (N,):
-                raise ValueError(f"beta array must have shape ({N},), got {b.shape}")
-            if np.any(b <= 0) or np.any(b > 1):
-                raise ValueError("all beta values must be in (0, 1]")
-        O = ortho_group.rvs(N, random_state=rng).astype(dtype)
-        return ES2NDynamics(beta=np.clip(b, 0.01, 1), O=O)
-    elif mode == "leakyrand":
-        if not (0 < leaky_rate <= 1):
-            raise ValueError(f"leaky_rate must be in (0, 1], got {leaky_rate}")
-        lr = rng.uniform(max(leaky_rate - scale, 0), min(leaky_rate + scale, 1), N).astype(dtype)
-        return LeakyDynamics(leaky_rate=np.clip(lr, 0, 1))
-    elif mode == "es2nrand":
-        if not (0 < beta <= 1):
-            raise ValueError(f"beta must be in (0, 1], got {beta}")
-        b = rng.uniform(max(beta - scale, 0), min(beta + scale, 1), N).astype(dtype)
-        O = ortho_group.rvs(N, random_state=rng).astype(dtype)
-        return ES2NDynamics(beta=np.clip(b, 0.01, 1), O=O)    
-    else: 
-        valid_modes = {"standard", "leaky", "leakyrand", "es2n", "es2nrand"}
-        raise ValueError(f"mode must be one of {valid_modes}, got '{mode}'")
-
-
 class ESN:
     
     """Echo State Network.
@@ -529,7 +162,6 @@ class ESN:
     """
     __slots__ = ('config', 'rng', 'dynamics', 'Wr', 'Wx', 'b', 'r', 'Wout', 'Wout_bias', '_use_sparse')
     def __init__(self, config: ESNConfig | None = None, dynamics: ReservoirDynamics | None = None, *, N: int | None = None, input_dim: int | None = None, **kwargs) -> None:
-        # build config
         if config is not None:
             if N is not None or input_dim is not None or kwargs: raise ValueError("Cannot specify both config and individual parameters")
             self.config = config
@@ -569,6 +201,24 @@ class ESN:
         """tanh activation function."""
         return np.tanh(z)
     
+    def _sparse_spectral_radius(self, J) -> float:
+        try:
+            vals, _ = sparse_eigs(J, k=1, which='LM')
+            return float(np.max(np.abs(vals)))
+        except ArpackNoConvergence as e:
+            if e.eigenvalues is not None and len(e.eigenvalues) > 0:
+                return float(np.max(np.abs(e.eigenvalues)))
+            try:
+                v0 = self.rng.standard_normal(J.shape[0])
+                vals, _ = sparse_eigs(J, k=1, which='LM', tol=1e-4, maxiter=J.shape[0] * 20, v0=v0)
+                return float(np.max(np.abs(vals)))
+            except ArpackNoConvergence as e2:
+                if e2.eigenvalues is not None and len(e2.eigenvalues) > 0:
+                    return float(np.max(np.abs(e2.eigenvalues)))
+                raise RuntimeError(
+                    f"ARPACK failed to converge on reservoir spectral radius for N={J.shape[0]}"
+                ) from e2
+
     def _create_small_world_weights(self) -> NDArray | csr_matrix:
         """Watts-Strogatz small-world reservoir.
         """
@@ -607,14 +257,13 @@ class ESN:
         J.eliminate_zeros()
         
         if J.nnz > 0:
-            eigvals, _ = sparse_eigs(J, k=1, which='LM')
-            rho = np.max(np.abs(eigvals))
+            rho = self._sparse_spectral_radius(J)
             if rho > 0:
                 J = (J * (cfg.spectral_radius / rho)).tocsr()
-        
+
         if not self._use_sparse:
             J = J.toarray()
-        
+
         return J
     def _create_scale_free_weights(self) -> NDArray | csr_matrix:
         """Scale-free reservoir.
@@ -660,10 +309,9 @@ class ESN:
         if not cfg.self_connections:
             J.setdiag(0)
         J.eliminate_zeros()
-        
+
         if J.nnz > 0:
-            eigvals, _ = sparse_eigs(J, k=1, which='LM')
-            rho = np.max(np.abs(eigvals))
+            rho = self._sparse_spectral_radius(J)
             if rho > 0:
                 J = (J * (cfg.spectral_radius / rho)).tocsr()
         
@@ -680,8 +328,7 @@ class ESN:
                 J = sparse_random(cfg.N, cfg.N, density=1 - cfg.sparsity, data_rvs=lambda s: self.rng.normal(0, cfg.spectral_radius / np.sqrt(cfg.N), s), format='csr', random_state=self.rng).astype(cfg.dtype)
                 if not cfg.self_connections: J.setdiag(0)
                 J.eliminate_zeros()
-                vals, _ = sparse_eigs(J, k=1, which='LM')
-                rho = np.max(np.abs(vals))
+                rho = self._sparse_spectral_radius(J)
                 if rho == 0: rho = 1.0
                 J = (J * (cfg.spectral_radius / rho)).tocsr()
             else:
@@ -697,9 +344,8 @@ class ESN:
                 if not cfg.self_connections:
                     J.setdiag(0)
                 J.eliminate_zeros()
-                
-                eigvals, _ = sparse_eigs(J, k=1, which='LM')
-                rho = np.max(np.abs(eigvals))
+
+                rho = self._sparse_spectral_radius(J)
                 if rho == 0: rho = 1.0
                 J = (J * (cfg.spectral_radius / rho)).tocsr()
             else:
@@ -714,8 +360,7 @@ class ESN:
                 J = sparse_random(cfg.N, cfg.N, density=1 - cfg.sparsity, data_rvs=lambda s: self.rng.choice([-1, 1], size=s, p=[0.5, 0.5]), format='csr', random_state=self.rng).astype(cfg.dtype)
                 if not cfg.self_connections: J.setdiag(0)
                 J.eliminate_zeros()
-                eigvals, _ = sparse_eigs(J, k=1, which='LM')
-                rho = np.max(np.abs(eigvals))
+                rho = self._sparse_spectral_radius(J)
                 if rho == 0: rho = 1.0
                 J = (J * (cfg.spectral_radius / rho)).tocsr()
             else:
@@ -729,8 +374,7 @@ class ESN:
             J = cfg.weights_generation_strategy(self.rng, cfg.N, cfg.N, cfg.spectral_radius, cfg.sparsity, cfg.self_connections)
             if not cfg.self_connections: J.setdiag(0)
             J.eliminate_zeros()
-            eigvals, _ = sparse_eigs(J, k=1, which='LM')
-            rho = np.max(np.abs(eigvals))
+            rho = self._sparse_spectral_radius(J)
             if rho == 0: rho = 1.0
             J = (J * (cfg.spectral_radius / rho)).tocsr()
             return J
@@ -893,11 +537,11 @@ class ESN:
             reg = self.config.alpha * np.eye(SS_t.shape[0], dtype=self.config.dtype)
             Gram = SS_t + reg
             YS_t = targets @ states_with_bias.T
-            
+
             c_factor = cho_factor(Gram, overwrite_a=False, check_finite=False)
             W_t = cho_solve(c_factor, YS_t.T, check_finite=False)
             Wout_full = W_t.T
-        except Exception:
+        except np.linalg.LinAlgError:
             ridge = Ridge(alpha=self.config.alpha, fit_intercept=False, solver='sparse_cg')
             ridge.fit(states_with_bias.T, targets.T)
             Wout_full = ridge.coef_
@@ -907,26 +551,30 @@ class ESN:
         self.Wout = Wout_full[:, :-1]
         self.Wout_bias = Wout_full[:, -1]
     
-    def predict(self, warmup: NDArray, steps: int) -> tuple[NDArray, NDArray]:
+    def predict(self, warmup: NDArray, steps: int, return_states: bool = True) -> tuple[NDArray, NDArray | None]:
         """generate autonomous predictions.
-        
+
         Parameters
         ----------
         warmup : ndarray of shape (input_dim, warmup_length)
             Sequence to initialize reservoir.
         steps : int
             Number of prediction steps.
-            
+        return_states : bool, default=True
+            If False, skip allocating and filling the (N, steps) states buffer.
+            Returns (predictions, None). For large N this saves N*steps*8 bytes
+            per call and a per-step copy — useful for bulk evaluation.
+
         Returns
         -------
         predictions : ndarray of shape (input_dim, steps)
             Predicted time series.
-        states : ndarray of shape (N, steps)
-            Reservoir states during prediction.
+        states : ndarray of shape (N, steps) or None
+            Reservoir states during prediction, or None if return_states=False.
         """
         if not self.is_trained:
             raise RuntimeError("ESN must be trained before prediction. Call train() first.")
-        
+
         # validate warmup
         warmup = np.asarray(warmup)
         if warmup.ndim != 2:
@@ -937,26 +585,26 @@ class ESN:
             raise ValueError("warmup must have at least 1 timestep")
         if not np.isfinite(warmup).all():
             raise ValueError("warmup contains NaN or infinite values")
-        
+
         # validate steps
         if not isinstance(steps, (int, np.integer)) or steps <= 0:
             raise ValueError(f"steps must be a positive integer, got {steps}")
-        
+
         self.reset_state()
-        
+
         # warmup
         for i in range(warmup.shape[1]):
             self.step(warmup[:, i])
-        
-        # autonomous prediction
+
         predictions = np.zeros((self.input_dim, steps), dtype=self.config.dtype)
-        states = np.zeros((self.N, steps), dtype=self.config.dtype)
-        
+        states = np.zeros((self.N, steps), dtype=self.config.dtype) if return_states else None
+
         for i in range(steps):
             output = self.Wout @ self.r + self.Wout_bias
             predictions[:, i] = output
             self.step(output)
-            states[:, i] = self.r
+            if return_states:
+                states[:, i] = self.r
         
         return predictions, states
     
@@ -1004,7 +652,72 @@ class ESN:
         
         return predictions, states
     
-    def lyapunov_spectrum(self, initial_data: NDArray, num_lyaps: int = 40, steps: int = 10000, norm_time: int = 10, dt: float = 0.25, num_samples: int = 5, warmup: int = 100, transient: int = 100, calculate_convergence: bool = False) -> dict:
+    def _lyapunov_sample(self, r0, Z, init_segment, ref_segment, projections, Wr,
+                         num_lyaps, steps, norm_time, dt, transient, calculate_convergence):
+        """Run one Lyapunov sample on a local reservoir state; safe to call from a joblib worker."""
+        dtype = self.config.dtype
+        Wx, Wout, b = self.Wx, self.Wout, self.b
+        Wout_bias = self.Wout_bias
+        dynamics = self.dynamics
+        use_sparse = self._use_sparse
+
+        r = r0.copy()
+        for i in range(init_segment.shape[1]):
+            x = init_segment[:, i]
+            if use_sparse:
+                z = Wr.dot(r) + Wx @ x + b
+            else:
+                z = Wr @ r + Wx @ x + b
+            r = dynamics.update(r, z, np.tanh)
+
+        delta, R_init = np.linalg.qr(Z, mode='reduced')
+        delta *= np.sign(np.diag(R_init))
+
+        for t_step in range(transient):
+            output = Wout @ r + Wout_bias
+            if use_sparse:
+                z = Wr.dot(r) + Wx @ output + b
+            else:
+                z = Wr @ r + Wx @ output + b
+            delta, r = dynamics.jacobian_update(delta, r, z, Wr, Wx, Wout)
+            if (t_step + 1) % norm_time == 0:
+                delta, _ = np.linalg.qr(delta, mode='reduced')
+
+        delta, _ = np.linalg.qr(delta, mode='reduced')
+
+        R_ii_sum = np.zeros(num_lyaps, dtype=dtype)
+        local_convergence = [] if calculate_convergence else None
+        norm_count = 0
+        trajectory = np.zeros((self.input_dim, steps), dtype=dtype)
+        for t in range(steps):
+            output = Wout @ r + Wout_bias
+            trajectory[:, t] = output
+            if use_sparse:
+                z = Wr.dot(r) + Wx @ output + b
+            else:
+                z = Wr @ r + Wx @ output + b
+            delta, r = dynamics.jacobian_update(delta, r, z, Wr, Wx, Wout)
+            if (t + 1) % norm_time == 0:
+                Q, R_qr = np.linalg.qr(delta, mode='reduced')
+                R_ii_sum += np.log(np.maximum(np.abs(np.diag(R_qr)), np.finfo(dtype).tiny))
+                delta = Q[:, :num_lyaps]
+                norm_count += 1
+                if calculate_convergence:
+                    local_convergence.append(R_ii_sum / (norm_count * norm_time * dt))
+
+        if norm_count > 0:
+            lyap_exps = R_ii_sum / (norm_count * norm_time * dt)
+        else:
+            lyap_exps = np.full(num_lyaps, np.nan)
+
+        ref_proj_sorted = np.sort(ref_segment.T @ projections, axis=0)
+        traj_proj_sorted = np.sort(trajectory.T @ projections, axis=0)
+        distance = float(np.mean((ref_proj_sorted - traj_proj_sorted) ** 2) ** 0.5)
+
+        convergence = np.array(local_convergence) if local_convergence else None
+        return lyap_exps, distance, convergence, norm_count
+
+    def lyapunov_spectrum(self, initial_data: NDArray, num_lyaps: int = 40, steps: int = 10000, norm_time: int = 10, dt: float = 0.25, num_samples: int = 5, warmup: int = 100, transient: int = 100, calculate_convergence: bool = False, n_jobs: int = -2) -> dict:
         """lyapunov spectrum of trained ESN dynamics.
         
         Uses QR decomposition with tangent space propagation.
@@ -1029,7 +742,9 @@ class ESN:
             Autonomous steps after forcing before measurement.
         calculate_convergence : bool, default=False
             Whether to calculate convergence of the Lyapunov exponents.
-            
+        n_jobs : int, default=-2
+            joblib worker count for the sample loop (1 = sequential).
+
         Returns
         -------
         dict with keys: 'mean', 'std', 'all_samples', 'convergence',
@@ -1079,73 +794,53 @@ class ESN:
             raise ValueError(f"initial_data length ({initial_data.shape[1]}) is too short for {num_samples} samples with warmup={warmup}")
         
         dtype = self.config.dtype
-        
-        Wr = self.Wr.toarray() if hasattr(self.Wr, 'toarray') else self.Wr
-        
+        Wr = self.Wr.tocsc() if hasattr(self.Wr, 'tocsc') else self.Wr
+
         all_lyap_exps = np.zeros((num_samples, num_lyaps))
         convergence_history = []
         distances = []
-        
+
         init_length = min(warmup, initial_data.shape[1] // num_samples)
-        random_starts = self.rng.integers(0, initial_data.shape[1] - init_length, size=num_samples)
-        
+        max_start = initial_data.shape[1] - init_length - steps
+        if max_start < 0:
+            raise ValueError(
+                f"initial_data length ({initial_data.shape[1]}) is too short for "
+                f"init_length={init_length} + steps={steps} = {init_length + steps}"
+            )
+        random_starts = self.rng.integers(0, max_start + 1, size=num_samples)
+
+        n_proj = 50
+        D = self.input_dim
+        proj_blocks = []
+        for _ in range(0, n_proj, D):
+            Z_proj = self.rng.standard_normal((D, D)).astype(dtype)
+            Qp, _ = np.linalg.qr(Z_proj)
+            proj_blocks.append(Qp)
+        projections = np.hstack(proj_blocks)[:, :n_proj]
+
+        per_sample_inputs = []
         for sample_idx in range(num_samples):
-            # initialize reservoir
-            self.reset_state()
-            
-            start_idx = random_starts[sample_idx]
+            r0 = self.rng.uniform(-1, 1, self.N).astype(dtype)
+            Z = self.rng.standard_normal((self.N, num_lyaps)).astype(dtype)
+            start_idx = int(random_starts[sample_idx])
             end_idx = min(start_idx + init_length, initial_data.shape[1])
             init_segment = initial_data[:, start_idx:end_idx]
-            
-            # force with data
-            for i in range(init_segment.shape[1]):
-                self.step(init_segment[:, i])
-            
-            delta = ortho_group.rvs(self.N, random_state=self.rng).astype(dtype)[:, :num_lyaps]
-            delta, _ = np.linalg.qr(delta, mode='reduced')
-            WxWout = self.Wx @ self.Wout
-            for t_step in range(transient):
-                output = self.Wout @ self.r + self.Wout_bias
-                z = self._compute_preactivation(output)
-                delta, self.r = self.dynamics.jacobian_update(delta, self.r, z, Wr, WxWout)
-                if (t_step + 1) % norm_time == 0:
-                    Q, _ = np.linalg.qr(delta, mode='reduced')
-                    delta = Q
-                    
-            delta, _ = np.linalg.qr(delta, mode='reduced')        
-            R_ii_sum = np.zeros(num_lyaps, dtype=dtype)
-            if calculate_convergence: local_convergence = []
-            norm_count = 0
-            
-            trajectory = np.zeros((self.input_dim, steps), dtype=dtype)
-            for step in range(steps):
-                output = self.Wout @ self.r + self.Wout_bias
-                trajectory[:, step] = output
-                
-                # compute pre-activation
-                z = self._compute_preactivation(output)
-                
-                # propagate tangent vectors using dynamics
-                delta, self.r = self.dynamics.jacobian_update(delta, self.r, z, Wr, WxWout)
-                
-                # qr renormalization
-                if (step + 1) % norm_time == 0:
-                    Q, R = np.linalg.qr(delta, mode='reduced')
-                    R_ii_sum += np.log(np.maximum(np.abs(np.diag(R)), np.finfo(dtype).tiny))
-                    delta = Q[:, :num_lyaps]
-                    norm_count += 1
-                    if calculate_convergence: local_convergence.append(R_ii_sum / (norm_count * norm_time * dt))
-            
-            # compute trajectory distance
-            try:
-                ref_segment = initial_data[:, end_idx:end_idx + steps]
-                if ref_segment.shape[1] == steps: distances.append(ot.sliced_wasserstein_distance(ref_segment.T, trajectory.T, n_projections=50))
-            except ImportError: pass
-            
-            if norm_count > 0:
-                all_lyap_exps[sample_idx] = R_ii_sum / (norm_count * norm_time * dt)
-                if calculate_convergence: convergence_history.append(np.array(local_convergence))
-            else: all_lyap_exps[sample_idx] = np.nan
+            ref_segment = initial_data[:, end_idx:end_idx + steps]
+            per_sample_inputs.append((r0, Z, init_segment, ref_segment))
+
+        results = Parallel(n_jobs=n_jobs)(
+            delayed(self._lyapunov_sample)(
+                r0, Z, init_segment, ref_segment, projections, Wr,
+                num_lyaps, steps, norm_time, dt, transient, calculate_convergence,
+            )
+            for (r0, Z, init_segment, ref_segment) in per_sample_inputs
+        )
+
+        for sample_idx, (lyap_exps, distance, convergence, norm_count) in enumerate(results):
+            all_lyap_exps[sample_idx] = lyap_exps
+            distances.append(distance)
+            if calculate_convergence and convergence is not None:
+                convergence_history.append(convergence)
         
         valid_mask = ~np.any(np.isnan(all_lyap_exps), axis=1)
         all_lyap_exps_valid = all_lyap_exps[valid_mask]
@@ -1248,7 +943,7 @@ class ESN:
     def _conditional_lyapunov_fast(self, data: NDArray, Wr, warmup: int, transient: int,
                                     norm_time: int, dt: float, 
                                     calculate_convergence: bool) -> dict:
-        """Fast max CLE using power iteration (single vector, sparse-compatible)."""
+        """Max CLE"""
         dtype = self.config.dtype
         T = data.shape[1]
         measure_steps = T - warmup
@@ -1260,7 +955,7 @@ class ESN:
         # Drive reservoir and compute CLE simultaneously (no storage needed)
         r = self.r.copy()
         
-        # Transient phase - let g align with dominant direction
+        #transient phase
         for i in range(transient):
             z = self.Wr.dot(r) + self.Wx @ data[:, warmup + i] + self.b
             g = self.dynamics.conditional_jacobian_update_vector(g, z, Wr)
@@ -1269,7 +964,7 @@ class ESN:
             if (i + 1) % norm_time == 0:
                 g /= np.linalg.norm(g)
         
-        # Measurement phase
+        # measurement phase
         log_sum = 0.0
         norm_count = 0
         convergence = [] if calculate_convergence else None
@@ -1305,12 +1000,12 @@ class ESN:
     def _conditional_lyapunov_full(self, data: NDArray, Wr, num_lyaps: int, 
                                     warmup: int, transient: int, norm_time: int, 
                                     dt: float, calculate_convergence: bool) -> dict:
-        """Full spectrum computation (optimized for sparse Wr)."""
+        """Full spectrum"""
         dtype = self.config.dtype
         T = data.shape[1]
         measure_steps = T - warmup
         
-        # Pre-compute states and preactivations (needed for multiple vectors)
+        # pre-compute states and preactivations
         states = np.zeros((self.N, measure_steps), dtype=dtype)
         preactivations = np.zeros((self.N, measure_steps), dtype=dtype)
         
@@ -1321,11 +1016,11 @@ class ESN:
             states[:, i] = r
             preactivations[:, i] = z
         
-        # Initialize tangent vectors
-        G = ortho_group.rvs(self.N, random_state=self.rng).astype(dtype)[:, :num_lyaps]
-        G, _ = np.linalg.qr(G, mode='reduced')
+        Z = self.rng.standard_normal((self.N, num_lyaps)).astype(dtype)
+        G, R = np.linalg.qr(Z, mode='reduced')
+        G *= np.sign(np.diag(R))
         
-        # Transient phase
+        # transient phase
         for i in range(transient // norm_time):
             for j in range(norm_time):
                 idx = i * norm_time + j
@@ -1334,11 +1029,20 @@ class ESN:
                     G, states[:, idx], preactivations[:, idx], Wr)
             G, _ = np.linalg.qr(G, mode='reduced')
         
-        # Measurement phase
+        # measurement phase
         start_idx = transient
         end_idx = measure_steps
         num_renorms = (end_idx - start_idx) // norm_time
-        
+
+        if num_renorms <= 0:
+            return {
+                'exponents': np.full(num_lyaps, np.nan),
+                'convergence': None,
+                'max_cle': np.nan,
+                'sum_cle': np.nan,
+                'num_renorms': 0,
+            }
+
         R_log_sum = np.zeros(num_lyaps, dtype=dtype)
         convergence = np.zeros((num_renorms, num_lyaps), dtype=dtype) if calculate_convergence else None
         
@@ -1355,7 +1059,7 @@ class ESN:
             if calculate_convergence:
                 convergence[i] = R_log_sum / ((i + 1) * norm_time * dt)
         
-        # Final exponents (sorted descending)
+        # final exponents
         exponents = R_log_sum / (num_renorms * norm_time * dt)
         sort_idx = np.argsort(exponents)[::-1]
         exponents = exponents[sort_idx]
@@ -1383,7 +1087,7 @@ class ESN:
         
         cfg = self.config
         
-        # config
+        # configuration
         config_data = {
             'N': cfg.N,
             'input_dim': cfg.input_dim,
@@ -1406,7 +1110,7 @@ class ESN:
         for k, v in dynamics_params.items():
             dynamics_data[f'dynamics_{k}'] = v
         
-        # weights - handle sparse
+        # weights
         if hasattr(self.Wr, 'toarray'): weights_data = {'Wr_sparse': True, 'Wr_data': self.Wr.data, 'Wr_indices': self.Wr.indices, 'Wr_indptr': self.Wr.indptr, 'Wr_shape': np.array(self.Wr.shape)}
         else: weights_data = {'Wr_sparse': False, 'Wr': self.Wr}
         
@@ -1415,7 +1119,10 @@ class ESN:
         # output weights
         if self.is_trained:
             weights_data['Wout'] = self.Wout
-            weights_data['Wout_bias'] = self.Wout_bias  
+            weights_data['Wout_bias'] = self.Wout_bias
+
+        weights_data['rng_state'] = np.array(json.dumps(self.rng.bit_generator.state))
+
         np.savez_compressed(path, **config_data, **dynamics_data, **weights_data)
 
     @classmethod
@@ -1437,7 +1144,6 @@ class ESN:
         if not path.endswith('.npz'):
             raise ValueError(f"path must end with '.npz', got '{path}'")
         
-        import os
         if not os.path.exists(path):
             raise FileNotFoundError(f"model file not found: '{path}'")
         
@@ -1471,18 +1177,21 @@ class ESN:
         elif dynamics_mode == 'es2n': dynamics = ES2NDynamics(beta=data['dynamics_beta'], O=data['dynamics_O'])
         else: raise ValueError(f"unknown mode: {dynamics_mode}")
         
-        #  instance 
+        #  instance
         esn = object.__new__(cls)
         esn.config = config
         esn.dynamics = dynamics
         esn.rng = np.random.default_rng(config.seed)
-        
+        if 'rng_state' in data:
+            try: esn.rng.bit_generator.state = json.loads(data['rng_state'].item())
+            except (ValueError, TypeError): pass
+
         #  weights
         if data['Wr_sparse']: esn.Wr = csr_matrix((data['Wr_data'], data['Wr_indices'], data['Wr_indptr']), shape=tuple(data['Wr_shape']))
         else: esn.Wr = data['Wr']
-        
+
         esn.Wx, esn.b, esn.r = data['Wx'], data['b'], data['r']
-        esn._use_sparse = config.sparsity > 0.95
+        esn._use_sparse = bool(data['Wr_sparse'])
         
         # output weights 
         if 'Wout' in data:

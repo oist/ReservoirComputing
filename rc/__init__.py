@@ -33,13 +33,22 @@ EvaluationConfig : Evaluation configuration
 from rc.esn import (
     ESN,
     ESNConfig,
+    logger,
+)
+from rc.dynamics import (
+    ReservoirDynamics,
     StandardDynamics,
     LeakyDynamics,
     ES2NDynamics,
     create_dynamics,
+)
+from rc.analysis import (
     participation_ratio,
     analyse_dynamics,
-    logger,
+)
+from rc.metrics import (
+    valid_prediction_time,
+    calculate_max_conditional_lyapunov_exponent,
 )
 from rc.optimisation import (
     ESNSearchSpace,
@@ -48,8 +57,6 @@ from rc.optimisation import (
     EvaluationConfig,
     SearchParam,
     optimize_esn,
-    calculate_max_conditional_lyapunov_exponent,
-    valid_prediction_time,
 )
 
 __version__ = "0.1.0"

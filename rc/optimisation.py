@@ -8,65 +8,10 @@ from ax.service.utils.instantiation import ObjectiveProperties
 from numpy.typing import NDArray
 from scipy.sparse.linalg import ArpackNoConvergence
 from rc.esn import ESN, ESNConfig, logger
-from ax.service.utils.instantiation import ObjectiveProperties
+from rc.metrics import valid_prediction_time, calculate_max_conditional_lyapunov_exponent
 import time
 
-def valid_prediction_time(true_data, predictions, threshold=0.4, dt=0.01):
-    """
-    Compute valid prediction time before trajectory diverges.
-    
-    Parameters
-    ----------
-    true_data : ndarray of shape (D, T)
-        Ground truth trajectory.
-    predictions : ndarray of shape (D, T)
-        Predicted trajectory.
-    threshold : float, default=0.4
-        Normalized squared error threshold for divergence.
-    dt : float, default=0.01
-        Time step for converting steps to time.
-    
-    Returns
-    -------
-    vpt : float
-        Valid prediction time in time units.
-    """
-    variance = np.var(np.sum(true_data, axis=0))
-    squared_diff = np.sum((true_data - predictions)**2, axis=0)
-    normalized_error = squared_diff / variance
-    
-    divergence_idx = np.where(normalized_error > threshold)[0]
-    valid_steps = divergence_idx[0] if len(divergence_idx) > 0 else len(normalized_error)
-    
-    return valid_steps * dt
 
-def calculate_max_conditional_lyapunov_exponent(esn: ESN, data: NDArray, dt: float, length: int) -> float:
-    """calculate the max conditional Lyapunov exponent of the ESN.
-    
-    Parameters
-    ----------
-    esn : ESN
-        Trained ESN model.
-    data : NDArray
-        Data of shape (input_dim, T).
-        
-    Returns
-    -------
-    float
-        Max conditional Lyapunov exponent.
-    """
-    if not isinstance(esn, ESN):
-        raise TypeError(f"esn must be an ESN instance, got {type(esn).__name__}")
-    if not esn.is_trained:
-        raise RuntimeError("ESN must be trained before computing conditional Lyapunov exponent. Call train() first.")
-    
-    data = np.asarray(data)
-    if data.ndim != 2:
-        raise ValueError(f"data must be 2D array of shape (input_dim, T), got shape {data.shape}")
-    if data.shape[0] != esn.input_dim:
-        raise ValueError(f"data first dimension must match ESN input_dim ({esn.input_dim}), got {data.shape[0]}")
-    
-    return esn.conditional_lyapunov_spectrum(data[:,:length], num_lyaps=1, norm_time=5, dt=dt)["exponents"][0]
 @dataclass
 class SearchParam:
     """search parameter for ESN hyperparameters.
@@ -200,6 +145,8 @@ class ESNSearchSpace:
         seed: int | None = None,
         constrain_cle: bool = False,
         cle_threshold: float = 0.0,
+        num_trials: int | None = None,
+        num_initialization_trials: int | None = None,
     ) -> AxClient:
         """Create Ax client for optimization.
         
@@ -231,8 +178,9 @@ class ESNSearchSpace:
             parameters=self.to_ax_params(), 
             objectives={objective_name: ObjectiveProperties(minimize=minimize)},
             outcome_constraints=outcome_constraints,
+            choose_generation_strategy_kwargs={"num_trials": num_trials, "num_initialization_trials": num_initialization_trials, "min_sobol_trials_observed": int(num_initialization_trials / 2) if num_initialization_trials else None}
         )
-        
+
         logger.debug(f"Created Ax client with constraints: {outcome_constraints}")
         return ax
 
@@ -408,7 +356,7 @@ class EvaluationConfig:
     constrain_cle: bool = False
     cle_threshold: float = 0.0
     length: int = 10000
-    
+    compare_metrics: list[str] | None = None
     def __post_init__(self):
         # validate integer parameters
         if not isinstance(self.washout, int) or self.washout < 0:
@@ -450,13 +398,13 @@ class ESNObjective:
     
     Attributes
     ----------
-    data : ndarray of shape (T, D)
+    data : ndarray of shape (input_dim, T)
         Data.
     space : ESNSearchSpace
         Search space.
     config : EvaluationConfig, default=EvaluationConfig()
         Evaluation configuration.
-        
+
     Examples
     --------
     >>> import numpy as np
@@ -467,8 +415,8 @@ class ESNObjective:
     ...     .fix(N=500)
     ...     .build())
     >>> objective = ESNObjective(data, space)
-    >>> result = objective({"spectral_radius": 0.9})
-    >>> print(result)  # {'wasserstein': (median, std)}
+    >>> main, compare = objective({"spectral_radius": 0.9})
+    >>> main  # {'wasserstein': (median, stderr), ...}
     """
     def __init__(self, data: NDArray, space: ESNSearchSpace, config: EvaluationConfig = EvaluationConfig(), seed: int = 42):
         # validate inputs
@@ -491,7 +439,14 @@ class ESNObjective:
         self.config = config
         self.space = space
         self.seed = seed
-        self.data = data.T if data.shape[0] > data.shape[1] else data
+        if data.shape[0] > data.shape[1]:
+            logger.warning(
+                f"data shape {data.shape} has more features than timesteps; "
+                f"auto-transposing to (input_dim, T). Pass (input_dim, T) explicitly to silence this."
+            )
+            self.data = data.T
+        else:
+            self.data = data
         self.D, self.T = self.data.shape
         
         # validate data length is sufficient
@@ -510,7 +465,14 @@ class ESNObjective:
                 f"Reduce washout, warmup_steps, predict_steps, or provide more data."
             )
         
-        self._needs_wasserstein = 'wasserstein' in config.metrics or 'max_wasserstein' in config.metrics
+        self._needs_wasserstein = (
+            'wasserstein' in config.metrics 
+            or 'max_wasserstein' in config.metrics 
+            or (config.compare_metrics and (
+                'wasserstein' in config.compare_metrics 
+                or 'max_wasserstein' in config.compare_metrics
+            ))
+        )
         time_start = time.time()
         self.starts = self._get_stratified_starts(
             n_total=config.n_predictions,
@@ -619,13 +581,14 @@ class ESNObjective:
             return {}  
         
         results = {m: [] for m in self.config.metrics}
+        compare_results = {m: [] for m in (self.config.compare_metrics or [])}
         
         time_start = time.time()
         if 'max_cle' in self.config.metrics or self.config.constrain_cle:
             try:
                 max_cle = calculate_max_conditional_lyapunov_exponent(esn, self.data, self.config.dt, self.config.length)
                 results['max_cle'] = [max_cle]
-            except (ArpackNoConvergence, np.linalg.LinAlgError, Exception) as e:
+            except Exception as e:
                 logger.warning(f"CLE computation failed: {e}")
                 results['max_cle'] = [1.0]
         time_end = time.time()
@@ -643,6 +606,10 @@ class ESNObjective:
                         results['max_wasserstein'].append(np.clip(sw_max, 0, self.config.clip_wasserstein))
                     if 'wasserstein' in results:
                         results['wasserstein'].append(np.clip(sw_mean, 0, self.config.clip_wasserstein))
+                    if 'max_wasserstein' in compare_results:
+                        compare_results['max_wasserstein'].append(np.clip(sw_max, 0, self.config.clip_wasserstein))
+                    if 'wasserstein' in compare_results:
+                        compare_results['wasserstein'].append(np.clip(sw_mean, 0, self.config.clip_wasserstein))
                 if 'vpt' in results:
                     gt = self.gt_windows[j]
                     results['vpt'].append(valid_prediction_time(gt, pred, self.config.vpt_threshold, self.config.dt))
@@ -651,29 +618,38 @@ class ESNObjective:
                 continue
         time_end = time.time()
         logger.debug(f"Time taken to evaluate instance {idx}: {time_end - time_start:.2f} seconds")
-        return {k: np.median(v) for k, v in results.items() if v}
+        return {k: np.median(v) for k, v in results.items() if v}, {k: np.median(v) for k, v in compare_results.items() if v}
     
-    def __call__(self, params: dict) -> dict:
-        """Evaluate ESN on multiple instances."""
+    def __call__(self, params: dict) -> tuple[dict, dict]:
+        """Evaluate ESN on multiple instances. Returns (main_output, compare_output)."""
         results = Parallel(n_jobs=self.config.n_jobs)(
             delayed(self._eval_instance)(params, i) 
             for i in range(self.config.n_instances)
         )
         
-        valid = [r for r in results if r]
-        if not valid:
+        # Separate main results and compare results
+        main_results = [r[0] for r in results if r]
+        compare_results = [r[1] for r in results if r and len(r) > 1]
+        
+        if not main_results:
             logger.warning(f"No valid results for {params}")
             output = {k: (10.0, 0.0) for k in self.config.metrics}
             if self.config.constrain_cle:
                 output['max_cle'] = (1.0, 0.0)
-            return output
-        
+            return output, {}
+
         output = {}
-        for k in valid[0]:
-            values = [r[k] for r in valid]
+        for k in main_results[0]:
+            values = [r[k] for r in main_results]
             output[k] = (np.median(values), np.std(values) / np.sqrt(len(values)))
-        
-        return output    
+
+        output_compare = {}
+        if compare_results:
+            for k in compare_results[0]:
+                values = [r[k] for r in compare_results]
+                output_compare[k] = (np.median(values), np.std(values) / np.sqrt(len(values)))
+
+        return output, output_compare
 
 def _generate_grid(space: ESNSearchSpace, points: dict[str, int | list[float]] | int) -> list[dict]:
     """generate parameter grid from search space.
@@ -726,12 +702,13 @@ def optimize_esn(
     n_trials: int = 30,
     method: Literal["bayesian", "grid"] = "bayesian",
     grid_points: dict[str, int | list[float]] | int = 5,
-) -> tuple[dict, dict, AxClient]:
+    num_initialization_trials: int | None = None,
+) -> tuple[dict, dict, AxClient, NDArray]:
     """Optimize ESN hyperparameters.
     
     Parameters
     ----------
-    data : NDArray of shape (T, D)
+    data : NDArray of shape (input_dim, T)
         Data.
     space : ESNSearchSpace
         Search space.
@@ -743,6 +720,8 @@ def optimize_esn(
         Optimization method.
     grid_points : dict or int, default=5
         Grid resolution (grid only).
+    num_initialization_trials : int | None, default=None
+        Number of initialization trials (Bayesian only).
     
     Returns
     -------
@@ -752,6 +731,8 @@ def optimize_esn(
         Best parameters from actual observations.
     ax : AxClient
         Ax client with all trials.
+    comparison : NDArray of shape (len(compare_metrics) + len(metrics), n_trials)
+        Per-trial values for compare_metrics followed by metrics.
         
     Examples
     --------
@@ -766,14 +747,15 @@ def optimize_esn(
     ...     .fix(N=500, mode="standard")
     ...     .build())
     >>> config = EvaluationConfig(n_predictions=5, n_instances=3)
-    >>> best_ax, best_obs, ax = optimize_esn(data, space, config, n_trials=30)
-    
+    >>> best_ax, best_obs, ax, comparison = optimize_esn(data, space, config, n_trials=30, num_initialization_trials=10)
+
     Grid search:
-    
-    >>> best_ax, best_obs, ax = optimize_esn(
+
+    >>> best_ax, best_obs, ax, comparison = optimize_esn(
     ...     data, space, config,
     ...     method="grid",
-    ...     grid_points={"spectral_radius": 10, "alpha": 5}
+    ...     grid_points={"spectral_radius": 10, "alpha": 5},
+    ...     num_initialization_trials=10
     ... )
     """
     # validate inputs
@@ -808,21 +790,27 @@ def optimize_esn(
         objective_name = 'vpt'
     else:
         objective_name = config.metrics[0]
+    minimize = objective_name in {'wasserstein', 'max_wasserstein', 'max_cle'}
     ax = space.create_ax_client(
         objective_name=objective_name,
+        minimize=minimize,
         constrain_cle=config.constrain_cle,
         cle_threshold=config.cle_threshold,
+        num_trials=n_trials,
+        num_initialization_trials=num_initialization_trials,
     )
     
     best_val = float('inf')
     best_params_observed = None
-
+    compare_metrics = config.compare_metrics or []
+    comparison = np.zeros((len(compare_metrics) + len(config.metrics), n_trials))
     def _passes_cle_constraint(result, config):
         if not config.constrain_cle:
             return True
-        cle_val = result.get('cle', [None])[0]
-        if cle_val is None:
+        cle_entry = result.get('max_cle')
+        if cle_entry is None:
             return False
+        cle_val = cle_entry[0] if isinstance(cle_entry, tuple) else cle_entry
         return cle_val <= config.cle_threshold
 
     if method == "grid":
@@ -831,7 +819,8 @@ def optimize_esn(
         
         for i, params in enumerate(grid):
             _, idx = ax.attach_trial(params)
-            result = objective(params)
+            result, compare_result = objective(params)
+            comparison[:, i] = [compare_result[m][0] for m in compare_metrics] + [result[m][0] for m in config.metrics]
             ax.complete_trial(idx, raw_data=result)
             
             val = result[config.metrics[0]][0]
@@ -842,12 +831,11 @@ def optimize_esn(
             if (i + 1) % 10 == 0 or i == len(grid) - 1:
                 logger.debug(f"[{i+1}/{len(grid)}] best={best_val:.4f}")
     
-    else:  
+    else:
         for i in range(n_trials):
             params, idx = ax.get_next_trial()
-            print(params)
-            result = objective(params)
-            print(result)
+            result, compare_result = objective(params)
+            comparison[:, i] = [compare_result[m][0] for m in compare_metrics] + [result[m][0] for m in config.metrics]
             ax.complete_trial(idx, raw_data=result)
             
             val = result[config.metrics[0]][0]
@@ -857,4 +845,4 @@ def optimize_esn(
             logger.debug(f"trial {i+1}: {val:.4f} (best={best_val:.4f})")
     
     best_params_ax, _ = ax.get_best_parameters()
-    return best_params_ax, best_params_observed, ax
+    return best_params_ax, best_params_observed, ax, comparison
