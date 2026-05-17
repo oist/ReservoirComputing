@@ -19,6 +19,25 @@ Echo State Network library for reservoir computing.
 > from rc import ESN
 > ```
 
+## Why pyreservoir?
+
+`pyreservoir` is built for **reconstructing ergodic properties from data**:
+
+- **Five reservoir variants with tunable memory.** Choose among
+  `standard` (memoryless), `leaky` / `leakyrand` (leaky integrator with
+  uniform or per-neuron leak rate), and `es2n` / `es2nrand` (ES²N with
+  orthogonal mixing).
+
+- **Sliced Wasserstein loss for hyperparameter tuning.**
+
+- **Echo State Property as a hard constraint.**
+
+- **Conditional and autonomous Lyapunov spectra.**
+
+- **Bayesian optimization with Ax, including outcome constraints.**
+
+- **Five weight-initialization strategies.**
+
 ## Install
 
 From PyPI:
