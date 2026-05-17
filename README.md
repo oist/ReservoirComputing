@@ -9,7 +9,7 @@
 
 Echo State Network library for reservoir computing.
 
-> Installed as **`pyreservoir`**, imported as **`rc`**:
+> Installed and imported:
 >
 > ```bash
 > pip install pyreservoir
@@ -27,7 +27,7 @@ From PyPI:
 pip install pyreservoir
 ```
 
-From source with uv (recommended for development — uses the pinned `uv.lock`):
+From source with uv:
 
 ```bash
 git clone https://github.com/oist/ReservoirComputing.git
@@ -36,7 +36,7 @@ uv sync                 # install runtime deps
 uv sync --extra dev     # add jupyter/matplotlib/plotly for the notebooks
 ```
 
-Or editable install with pip:
+Or dev install with pip:
 
 ```bash
 pip install -e .
@@ -140,6 +140,18 @@ esn = ESN(final_config)
 ## Examples
 
 See `examples/` for notebooks: Lorenz attractor, double pendulum, C. elegans dynamics.
+See 'figure/' for notebooks and scripts that reproduce the figures from the paper.
+
+## Folder Structure
+
+- `rc/`: core library code
+  -esn.py: ESN implementation
+  -optimization.py: hyperparameter optimization code
+  -metrics.py: evaluation metrics
+  -dynamics.py: ESN dynamics
+  -analysis.py: tools for analyzing ESN behavior
+- `examples/`: Jupyter notebooks demonstrating usage
+- `figure/`: code to reproduce paper figures
 
 ## Citation
 
