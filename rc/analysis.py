@@ -18,7 +18,9 @@ def participation_ratio(explained_variance: NDArray) -> float:
     """
     explained_variance = np.asarray(explained_variance)
     if explained_variance.ndim != 1:
-        raise ValueError(f"explained_variance must be 1D array, got shape {explained_variance.shape}")
+        raise ValueError(
+            f"explained_variance must be 1D array, got shape {explained_variance.shape}"
+        )
     if len(explained_variance) == 0:
         raise ValueError("explained_variance cannot be empty")
     if np.any(explained_variance < 0):
@@ -28,10 +30,12 @@ def participation_ratio(explained_variance: NDArray) -> float:
     if sum_sq == 0:
         raise ValueError("explained_variance cannot be all zeros")
 
-    return np.sum(explained_variance)**2 / sum_sq
+    return np.sum(explained_variance) ** 2 / sum_sq
 
 
-def analyse_dynamics(rc_trajectory: NDArray, pca_components: int | float = 0.95) -> dict:
+def analyse_dynamics(
+    rc_trajectory: NDArray, pca_components: int | float = 0.95
+) -> dict:
     """analyse the dynamics of the reservoir trajectory
 
     Parameters
@@ -51,11 +55,17 @@ def analyse_dynamics(rc_trajectory: NDArray, pca_components: int | float = 0.95)
     """
     rc_trajectory = np.asarray(rc_trajectory)
     if rc_trajectory.ndim != 2:
-        raise ValueError(f"rc_trajectory must be 2D array of shape (N, T), got shape {rc_trajectory.shape}")
+        raise ValueError(
+            f"rc_trajectory must be 2D array of shape (N, T), got shape {rc_trajectory.shape}"
+        )
     if rc_trajectory.shape[0] == 0 or rc_trajectory.shape[1] == 0:
-        raise ValueError(f"rc_trajectory cannot have zero-length dimensions, got shape {rc_trajectory.shape}")
+        raise ValueError(
+            f"rc_trajectory cannot have zero-length dimensions, got shape {rc_trajectory.shape}"
+        )
     if rc_trajectory.shape[1] < 2:
-        raise ValueError(f"rc_trajectory must have at least 2 timesteps for PCA, got {rc_trajectory.shape[1]}")
+        raise ValueError(
+            f"rc_trajectory must have at least 2 timesteps for PCA, got {rc_trajectory.shape[1]}"
+        )
 
     pca = PCA(n_components=pca_components)
     pca.fit(rc_trajectory.T)
@@ -63,7 +73,7 @@ def analyse_dynamics(rc_trajectory: NDArray, pca_components: int | float = 0.95)
     explained_variance = pca.explained_variance_ratio_
     effective_dim = participation_ratio(explained_variance)
     return {
-        'effective_dim': effective_dim,
-        'explained_variance': explained_variance,
-        'pca_scores': pca_scores,
+        "effective_dim": effective_dim,
+        "explained_variance": explained_variance,
+        "pca_scores": pca_scores,
     }

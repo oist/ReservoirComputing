@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the accompanying paper."
+title: "pyreservoir"
+abstract: "Echo State Network library for reservoir computing, with hyperparameter optimization and Lyapunov-aware stability constraints."
+authors:
+  - family-names: Kawano
+    given-names: Akira
+  - family-names: Soroka
+    given-names: Ilia
+  - family-names: Stephens
+    given-names: Greg J.
+repository-code: "https://github.com/oist/ReservoirComputing"
+license: MIT
+preferred-citation:
+  type: article
+  title: "Optimizing Reservoir Computing for Reconstructing Ergodic Properties"
+  authors:
+    - family-names: Kawano
+      given-names: Akira
+    - family-names: Soroka
+      given-names: Ilia
+    - family-names: Stephens
+      given-names: Greg J.
+  journal: "arXiv preprint"
+  year: 2026
+  identifiers:
+    - type: other
+      value: "arXiv:2605.01439"

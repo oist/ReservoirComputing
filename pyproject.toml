@@ -1,7 +1,7 @@
 [project]
-name = "rc"
+name = "pyreservoir"
 version = "0.1.0"
-description = "Library for reservoir computing"
+description = "Echo State Network library for reservoir computing (imported as `rc`)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -45,6 +45,12 @@ docs = [
     "mkdocs-material",
     "mkdocstrings[python]",
 ]
+
+[project.urls]
+Homepage = "https://github.com/oist/ReservoirComputing"
+Documentation = "https://oist.github.io/ReservoirComputing/"
+Repository = "https://github.com/oist/ReservoirComputing"
+Issues = "https://github.com/oist/ReservoirComputing/issues"
 
 [build-system]
 requires = ["hatchling"]
