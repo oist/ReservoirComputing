@@ -1,10 +1,33 @@
-# Reservoir ESN
+# pyreservoir
+
+[![PyPI](https://img.shields.io/pypi/v/pyreservoir.svg)](https://pypi.org/project/pyreservoir/)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-mkdocs--material-informational)](https://oist.github.io/ReservoirComputing/)
+[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-261230)](https://github.com/astral-sh/ruff)
+[![uv](https://img.shields.io/badge/managed%20by-uv-de5fe9)](https://github.com/astral-sh/uv)
 
 Echo State Network library for reservoir computing.
 
+> Installed and imported:
+>
+> ```bash
+> pip install pyreservoir
+> ```
+>
+> ```python
+> from rc import ESN
+> ```
+
 ## Install
 
-With uv (recommended — uses the pinned `uv.lock`):
+From PyPI:
+
+```bash
+pip install pyreservoir
+```
+
+From source with uv:
 
 ```bash
 git clone https://github.com/oist/ReservoirComputing.git
@@ -13,7 +36,7 @@ uv sync                 # install runtime deps
 uv sync --extra dev     # add jupyter/matplotlib/plotly for the notebooks
 ```
 
-Or with pip into an existing environment:
+Or dev install with pip:
 
 ```bash
 pip install -e .
@@ -21,7 +44,7 @@ pip install -e .
 
 ## Quick Start
 
-### Training 
+### Training
 
 ```python
 from rc import ESN
@@ -31,7 +54,7 @@ esn.train(data, washout=500)  # data: (input_dim, T)
 predictions, states = esn.predict(warmup, steps=1000)
 ```
 
-### Optimization 
+### Optimization
 
 ```python
 from rc import ESNSearchSpaceBuilder, EvaluationConfig, optimize_esn
@@ -117,6 +140,37 @@ esn = ESN(final_config)
 ## Examples
 
 See `examples/` for notebooks: Lorenz attractor, double pendulum, C. elegans dynamics.
+See 'figure/' for notebooks and scripts that reproduce the figures from the paper.
 
+## Folder Structure
 
+- `rc/`: core library code
+  -esn.py: ESN implementation
+  -optimization.py: hyperparameter optimization code
+  -metrics.py: evaluation metrics
+  -dynamics.py: ESN dynamics
+  -analysis.py: tools for analyzing ESN behavior
+- `examples/`: Jupyter notebooks demonstrating usage
+- `figure/`: code to reproduce paper figures
 
+## Citation
+
+If you use this library in academic work, please cite the accompanying paper:
+
+```bibtex
+@article{kawano2026optimizing,
+  title   = {Optimizing Reservoir Computing for Reconstructing Ergodic Properties},
+  author  = {Kawano, Akira and Soroka, Ilia and Stephens, Greg J},
+  journal = {arXiv preprint arXiv:2605.01439},
+  year    = {2026}
+}
+```
+
+## License
+
+Released under the [MIT License](LICENSE).
+
+## Contact
+
+Bugs, feature requests, and questions: please open an issue at
+[github.com/oist/ReservoirComputing/issues](https://github.com/oist/ReservoirComputing/issues).

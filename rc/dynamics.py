@@ -11,7 +11,9 @@ from scipy.stats import ortho_group
 class ReservoirDynamics(Protocol):
     """protocol for reservoir update dynamics"""
 
-    def update(self, r: NDArray, z: NDArray, activation: Callable[[NDArray], NDArray]) -> NDArray:
+    def update(
+        self, r: NDArray, z: NDArray, activation: Callable[[NDArray], NDArray]
+    ) -> NDArray:
         """compute new reservoir state
 
         Parameters
@@ -30,7 +32,15 @@ class ReservoirDynamics(Protocol):
         """
         ...
 
-    def jacobian_update(self, delta: NDArray, r: NDArray, z: NDArray, Wr: NDArray, Wx: NDArray, Wout: NDArray) -> tuple[NDArray, NDArray]:
+    def jacobian_update(
+        self,
+        delta: NDArray,
+        r: NDArray,
+        z: NDArray,
+        Wr: NDArray,
+        Wx: NDArray,
+        Wout: NDArray,
+    ) -> tuple[NDArray, NDArray]:
         """Propagate tangent vectors for Lyapunov computation.
 
         Parameters
@@ -66,16 +76,19 @@ class ReservoirDynamics(Protocol):
         """reconstruct from serialized parameters"""
         ...
 
-    def conditional_jacobian_update(self, delta: NDArray, r: NDArray, z: NDArray, Wr: NDArray) -> tuple[NDArray, NDArray]:
+    def conditional_jacobian_update(
+        self, delta: NDArray, r: NDArray, z: NDArray, Wr: NDArray
+    ) -> tuple[NDArray, NDArray]:
         """Propagate tangent vectors for conditional Lyapunov computation.
 
         The system is being driven by external data, so the output feedback is not included.
         """
         ...
 
-    def conditional_jacobian_update_vector(self, g: NDArray, z: NDArray, Wr: NDArray) -> NDArray:
-        """Propagate tangent vectors for conditional max CLE computation.
-        """
+    def conditional_jacobian_update_vector(
+        self, g: NDArray, z: NDArray, Wr: NDArray
+    ) -> NDArray:
+        """Propagate tangent vectors for conditional max CLE computation."""
         ...
 
 
@@ -89,22 +102,39 @@ class StandardDynamics:
     >>> dynamics = StandardDynamics()
     >>> dynamics = create_dynamics("standard", N=100)
     """
-    __slots__ = ()
-    def update(self, r: NDArray, z: NDArray, activation: Callable[[NDArray], NDArray]) -> NDArray: return activation(z)
 
-    def jacobian_update(self, delta: NDArray, r: NDArray, z: NDArray, Wr: NDArray, Wx: NDArray, Wout: NDArray) -> tuple[NDArray, NDArray]:
+    __slots__ = ()
+
+    def update(
+        self, r: NDArray, z: NDArray, activation: Callable[[NDArray], NDArray]
+    ) -> NDArray:
+        return activation(z)
+
+    def jacobian_update(
+        self,
+        delta: NDArray,
+        r: NDArray,
+        z: NDArray,
+        Wr: NDArray,
+        Wx: NDArray,
+        Wout: NDArray,
+    ) -> tuple[NDArray, NDArray]:
         s = np.tanh(z)
         D = 1.0 - s**2
         J_delta = Wr @ delta + Wx @ (Wout @ delta)
         delta_new = D[:, np.newaxis] * J_delta
         return delta_new, s
 
-    def get_params(self) -> dict: return {"mode": "standard"}
+    def get_params(self) -> dict:
+        return {"mode": "standard"}
 
     @classmethod
-    def from_params(cls, params: dict) -> "StandardDynamics": return cls()
+    def from_params(cls, params: dict) -> "StandardDynamics":
+        return cls()
 
-    def conditional_jacobian_update(self, delta: NDArray, r: NDArray, z: NDArray, Wr: NDArray) -> tuple[NDArray, NDArray]:
+    def conditional_jacobian_update(
+        self, delta: NDArray, r: NDArray, z: NDArray, Wr: NDArray
+    ) -> tuple[NDArray, NDArray]:
         """jacobian for driven dynamics."""
         s = np.tanh(z)
         D = 1.0 - s**2
@@ -112,8 +142,8 @@ class StandardDynamics:
         return delta_new, s
 
     def conditional_jacobian_update_vector(self, g: NDArray, z: NDArray, Wr) -> NDArray:
-        D = 1.0 - np.tanh(z)**2
-        Wr_g = Wr.dot(g) if hasattr(Wr, 'dot') else Wr @ g
+        D = 1.0 - np.tanh(z) ** 2
+        Wr_g = Wr.dot(g) if hasattr(Wr, "dot") else Wr @ g
         return D * Wr_g
 
 
@@ -146,37 +176,58 @@ class LeakyDynamics:
     >>> rng = np.random.default_rng(42)
     >>> dynamics = create_dynamics("leaky", N=100, leaky_rate=0.2, rng=rng)
     """
-    __slots__ = ('leaky_rate', 'keep_rate')
+
+    __slots__ = ("leaky_rate", "keep_rate")
     leaky_rate: NDArray
 
-    def __post_init__(self): self.keep_rate = 1.0 - self.leaky_rate
+    def __post_init__(self):
+        self.keep_rate = 1.0 - self.leaky_rate
 
-    def update(self, r: NDArray, z: NDArray, activation: Callable[[NDArray], NDArray]) -> NDArray: return self.keep_rate * r + self.leaky_rate * activation(z)
+    def update(
+        self, r: NDArray, z: NDArray, activation: Callable[[NDArray], NDArray]
+    ) -> NDArray:
+        return self.keep_rate * r + self.leaky_rate * activation(z)
 
-    def jacobian_update(self, delta: NDArray, r: NDArray, z: NDArray, Wr: NDArray, Wx: NDArray, Wout: NDArray) -> tuple[NDArray, NDArray]:
+    def jacobian_update(
+        self,
+        delta: NDArray,
+        r: NDArray,
+        z: NDArray,
+        Wr: NDArray,
+        Wx: NDArray,
+        Wout: NDArray,
+    ) -> tuple[NDArray, NDArray]:
         s = np.tanh(z)
         D = 1.0 - s**2
         J_delta = Wr @ delta + Wx @ (Wout @ delta)
-        delta_new = (self.keep_rate[:, np.newaxis] * delta + self.leaky_rate[:, np.newaxis] * (D[:, np.newaxis] * J_delta))
+        delta_new = self.keep_rate[:, np.newaxis] * delta + self.leaky_rate[
+            :, np.newaxis
+        ] * (D[:, np.newaxis] * J_delta)
         r_new = self.keep_rate * r + self.leaky_rate * s
         return delta_new, r_new
 
-    def get_params(self) -> dict: return {"mode": "leaky", "leaky_rate": self.leaky_rate}
+    def get_params(self) -> dict:
+        return {"mode": "leaky", "leaky_rate": self.leaky_rate}
 
     @classmethod
-    def from_params(cls, params: dict) -> "LeakyDynamics": return cls(leaky_rate=params["leaky_rate"])
+    def from_params(cls, params: dict) -> "LeakyDynamics":
+        return cls(leaky_rate=params["leaky_rate"])
 
-    def conditional_jacobian_update(self, delta: NDArray, r: NDArray, z: NDArray, Wr: NDArray) -> tuple[NDArray, NDArray]:
+    def conditional_jacobian_update(
+        self, delta: NDArray, r: NDArray, z: NDArray, Wr: NDArray
+    ) -> tuple[NDArray, NDArray]:
         """jacobian for driven dynamics."""
         s = np.tanh(z)
         D = 1.0 - s**2
-        delta_new = (self.keep_rate[:, np.newaxis] * delta + self.leaky_rate[:, np.newaxis] * (D[:, np.newaxis] * (Wr @ delta)))
+        delta_new = self.keep_rate[:, np.newaxis] * delta + self.leaky_rate[
+            :, np.newaxis
+        ] * (D[:, np.newaxis] * (Wr @ delta))
         r_new = self.keep_rate * r + self.leaky_rate * s
         return delta_new, r_new
 
     def conditional_jacobian_update_vector(self, g: NDArray, z: NDArray, Wr) -> NDArray:
-        D = 1.0 - np.tanh(z)**2
-        Wr_g = Wr.dot(g) if hasattr(Wr, 'dot') else Wr @ g
+        D = 1.0 - np.tanh(z) ** 2
+        Wr_g = Wr.dot(g) if hasattr(Wr, "dot") else Wr @ g
         return self.keep_rate * g + self.leaky_rate * (D * Wr_g)
 
 
@@ -209,15 +260,28 @@ class ES2NDynamics:
     >>> rng = np.random.default_rng(42)
     >>> dynamics = create_dynamics("es2n", N=100, beta=0.5, rng=rng)
     """
-    __slots__ = ('beta', 'O', 'keep_rate')
+
+    __slots__ = ("beta", "O", "keep_rate")
     beta: NDArray
     O: NDArray
 
-    def __post_init__(self): self.keep_rate = 1.0 - self.beta
+    def __post_init__(self):
+        self.keep_rate = 1.0 - self.beta
 
-    def update(self, r: NDArray, z: NDArray, activation: Callable[[NDArray], NDArray]) -> NDArray: return self.beta * activation(z) + self.keep_rate * (self.O @ r)
+    def update(
+        self, r: NDArray, z: NDArray, activation: Callable[[NDArray], NDArray]
+    ) -> NDArray:
+        return self.beta * activation(z) + self.keep_rate * (self.O @ r)
 
-    def jacobian_update(self, delta: NDArray, r: NDArray, z: NDArray, Wr: NDArray, Wx: NDArray, Wout: NDArray) -> tuple[NDArray, NDArray]:
+    def jacobian_update(
+        self,
+        delta: NDArray,
+        r: NDArray,
+        z: NDArray,
+        Wr: NDArray,
+        Wx: NDArray,
+        Wout: NDArray,
+    ) -> tuple[NDArray, NDArray]:
         s = np.tanh(z)
         D = 1.0 - s**2
         J_delta = Wr @ delta + Wx @ (Wout @ delta)
@@ -227,12 +291,16 @@ class ES2NDynamics:
         r_new = self.beta * s + self.keep_rate * (self.O @ r)
         return delta_new, r_new
 
-    def get_params(self) -> dict: return {"mode": "es2n", "beta": self.beta, "O": self.O}
+    def get_params(self) -> dict:
+        return {"mode": "es2n", "beta": self.beta, "O": self.O}
 
     @classmethod
-    def from_params(cls, params: dict) -> "ES2NDynamics": return cls(beta=params["beta"], O=params["O"])
+    def from_params(cls, params: dict) -> "ES2NDynamics":
+        return cls(beta=params["beta"], O=params["O"])
 
-    def conditional_jacobian_update(self, delta: NDArray, r: NDArray, z: NDArray, Wr: NDArray) -> tuple[NDArray, NDArray]:
+    def conditional_jacobian_update(
+        self, delta: NDArray, r: NDArray, z: NDArray, Wr: NDArray
+    ) -> tuple[NDArray, NDArray]:
         """jacobian for driven dynamics."""
         s = np.tanh(z)
         D = 1.0 - s**2
@@ -243,13 +311,20 @@ class ES2NDynamics:
         return delta_new, r_new
 
     def conditional_jacobian_update_vector(self, g: NDArray, z: NDArray, Wr) -> NDArray:
-        D = 1.0 - np.tanh(z)**2
-        Wr_g = Wr.dot(g) if hasattr(Wr, 'dot') else Wr @ g
+        D = 1.0 - np.tanh(z) ** 2
+        Wr_g = Wr.dot(g) if hasattr(Wr, "dot") else Wr @ g
         return self.beta * (D * Wr_g) + self.keep_rate * (self.O @ g)
 
 
-def create_dynamics(mode: Literal["standard", "leaky", "leakyrand", "es2n", "es2nrand"] | str, N: int, dtype: np.dtype = np.float64,
-                  leaky_rate: float | NDArray = 0.1, beta: float | NDArray = 0.5, scale: float = 0.1, rng: np.random.Generator = None) -> ReservoirDynamics:
+def create_dynamics(
+    mode: Literal["standard", "leaky", "leakyrand", "es2n", "es2nrand"] | str,
+    N: int,
+    dtype: np.dtype = np.float64,
+    leaky_rate: float | NDArray = 0.1,
+    beta: float | NDArray = 0.5,
+    scale: float = 0.1,
+    rng: np.random.Generator = None,
+) -> ReservoirDynamics:
     """function to create reservoir dynamics
 
     Parameters
@@ -293,7 +368,9 @@ def create_dynamics(mode: Literal["standard", "leaky", "leakyrand", "es2n", "es2
         else:
             lr = np.asarray(leaky_rate, dtype=dtype)
             if lr.shape != (N,):
-                raise ValueError(f"leaky_rate array must have shape ({N},), got {lr.shape}")
+                raise ValueError(
+                    f"leaky_rate array must have shape ({N},), got {lr.shape}"
+                )
             if np.any(lr <= 0) or np.any(lr > 1):
                 raise ValueError("all leaky_rate values must be in (0, 1]")
         return LeakyDynamics(leaky_rate=np.clip(lr, 0, 1))
@@ -313,7 +390,9 @@ def create_dynamics(mode: Literal["standard", "leaky", "leakyrand", "es2n", "es2
     elif mode == "leakyrand":
         if not (0 < leaky_rate <= 1):
             raise ValueError(f"leaky_rate must be in (0, 1], got {leaky_rate}")
-        lr = rng.uniform(max(leaky_rate - scale, 0), min(leaky_rate + scale, 1), N).astype(dtype)
+        lr = rng.uniform(
+            max(leaky_rate - scale, 0), min(leaky_rate + scale, 1), N
+        ).astype(dtype)
         return LeakyDynamics(leaky_rate=np.clip(lr, 0, 1))
     elif mode == "es2nrand":
         if not (0 < beta <= 1):

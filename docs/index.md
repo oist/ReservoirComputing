@@ -2,9 +2,17 @@
 
 Echo State Network library for reservoir computing.
 
+> Installed as **`pyreservoir`**, imported as **`rc`** (same convention as `scikit-learn` / `sklearn`).
+
 ## Install
 
-With uv (recommended):
+From PyPI:
+
+```bash
+pip install pyreservoir
+```
+
+From source with uv (recommended for development):
 
 ```bash
 git clone https://github.com/oist/ReservoirComputing.git
@@ -13,7 +21,7 @@ uv sync                 # runtime deps
 uv sync --extra dev     # + jupyter/matplotlib/plotly
 ```
 
-Or with pip:
+Or editable install with pip:
 
 ```bash
 pip install -e .
@@ -117,3 +125,25 @@ esn = ESN(final_config)
 ## Examples
 
 See `examples/` for notebooks: Lorenz attractor, double pendulum, C. elegans dynamics.
+
+## Citation
+
+If you use this library in academic work, please cite the accompanying paper:
+
+```bibtex
+@article{kawano2026optimizing,
+  title   = {Optimizing Reservoir Computing for Reconstructing Ergodic Properties},
+  author  = {Kawano, Akira and Soroka, Ilia and Stephens, Greg J},
+  journal = {arXiv preprint arXiv:2605.01439},
+  year    = {2026}
+}
+```
+
+## License
+
+Released under the [MIT License](https://github.com/oist/ReservoirComputing/blob/main/LICENSE).
+
+## Contact
+
+Bugs, feature requests, and questions: please open an issue at
+[github.com/oist/ReservoirComputing/issues](https://github.com/oist/ReservoirComputing/issues).
