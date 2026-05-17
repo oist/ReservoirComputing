@@ -46,7 +46,7 @@ from rc import ESNSearchSpaceBuilder, EvaluationConfig, optimize_esn
 
 space = ESNSearchSpaceBuilder().optimize("spectral_radius").optimize("alpha").fix(N=500).build()
 config = EvaluationConfig(washout=2000, predict_steps=5000, n_predictions=4)
-best_params, _, ax = optimize_esn(data, space, config, n_trials=20)
+best_params, best_observed, ax, comparison = optimize_esn(data, space, config, n_trials=20)
 final_config = space.build_config(best_params, input_dim=data.shape[0])
 esn = ESN(final_config)
 esn.train(data, washout=2000)
@@ -115,7 +115,7 @@ config = EvaluationConfig(
     cle_threshold=0.0,          # max conditional Lyapunov exponent
 )
 
-best_params, best_observed, ax = optimize_esn(data, space, config, n_trials=30)
+best_params, best_observed, ax, comparison = optimize_esn(data, space, config, n_trials=30)
 
 # use best params
 final_config = space.build_config(best_params, input_dim=data.shape[0])

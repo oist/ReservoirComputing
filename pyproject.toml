@@ -59,3 +59,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["rc"]
 
+[tool.hatch.build.targets.sdist]
+include = [
+    "rc/",
+    "README.md",
+    "LICENSE",
+    "CITATION.cff",
+    "pyproject.toml",
+]
+

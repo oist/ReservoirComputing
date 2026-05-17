@@ -1,5 +1,4 @@
 from __future__ import annotations
-from pickle import TRUE
 
 import numpy as np
 from numpy.typing import NDArray
@@ -42,15 +41,35 @@ class ESNConfig:
     alpha : float, default=1e-6
         Ridge regression regularization parameter.
     sparsity : float, default=0.9
-        Fraction of zero entries in reservoir weight matrix.
+        Fraction of zero entries in reservoir weight matrix. Must be in [0, 1).
     input_scaling : float, default=0.5
         Scaling factor for input weights.
     bias_scaling : float, default=0.1
         Scaling factor for bias vector.
     seed : int | None, default=None
         Random seed for reproducibility.
+    weights_generation_strategy : {"Gaussian", "Uniform", "Bernoulli", "Small-World", "Scale-Free"} or callable, default="Gaussian"
+        Distribution for reservoir weight initialization. A callable receives
+        ``(rng, shape)`` and returns an ndarray.
+    bias_generation_strategy : {"Gaussian", "Uniform", "Bernoulli"} or callable, default="Uniform"
+        Distribution for bias vector initialization.
+    input_generation_strategy : {"Gaussian", "Uniform", "Bernoulli"} or callable, default="Uniform"
+        Distribution for input weight initialization.
+    self_connections : bool, default=False
+        Whether to allow non-zero diagonal entries in the reservoir matrix.
     dtype : np.dtype, default=np.float64
         Data type for arrays.
+    mode : {"standard", "leaky", "leakyrand", "es2n", "es2nrand"}, default="standard"
+        Reservoir dynamics variant. Used to auto-build the dynamics when no
+        explicit ``dynamics`` is passed to :class:`ESN`.
+    leaky_rate : float, default=0.1
+        Leak rate for ``leaky`` / ``leakyrand`` modes. Must be in (0, 1].
+    beta : float, default=0.5
+        Nonlinearity mixing parameter for ``es2n`` / ``es2nrand`` modes.
+        Must be in (0, 1].
+    scale : float, default=0.1
+        Per-neuron randomness scale for ``leakyrand`` / ``es2nrand`` modes
+        (controls the uniform spread around ``leaky_rate``/``beta``).
     """
 
     # general hyperparameters
@@ -153,10 +172,18 @@ class ESN:
 
     Parameters
     ----------
-    config : ESNConfig
-        Network configuration.
-    dynamics : ReservoirDynamics
-        Reservoir update dynamics.
+    config : ESNConfig, optional
+        Network configuration. Mutually exclusive with the kwargs form below.
+    dynamics : ReservoirDynamics, optional
+        Reservoir update dynamics. If omitted, built from ``config.mode``
+        (or ``mode`` kwarg) via :func:`rc.dynamics.create_dynamics`.
+    N : int, optional
+        Reservoir size. Required if ``config`` is not given.
+    input_dim : int, optional
+        Input dimensionality. Required if ``config`` is not given.
+    **kwargs
+        Any other :class:`ESNConfig` field (``spectral_radius``, ``alpha``,
+        ``mode``, ``leaky_rate``, etc.) when constructing via the kwargs form.
 
     Attributes
     ----------
@@ -175,15 +202,23 @@ class ESN:
 
     Examples
     --------
+    Quick kwargs form (most concise):
+
     >>> import numpy as np
-    >>> from rc.esn import ESN, ESNConfig, StandardDynamics
+    >>> from rc import ESN
+    >>> esn = ESN(N=500, input_dim=3, spectral_radius=0.95)
+    >>> training_data = np.random.randn(3, 10000)  # (input_dim, T)
+    >>> esn.train(training_data, washout=100)
+    >>> warmup_data = np.random.randn(3, 100)
+    >>> predictions, states = esn.predict(warmup_data, steps=1000)
+
+    Explicit config + dynamics (for full control):
+
+    >>> from rc.esn import ESN, ESNConfig
+    >>> from rc.dynamics import StandardDynamics
     >>> config = ESNConfig(N=500, input_dim=3, spectral_radius=0.95)
     >>> dynamics = StandardDynamics()
     >>> esn = ESN(config, dynamics)
-    >>> training_data = np.random.randn(3, 10000)  # (input_dim, T)
-    >>> esn.train(training_data, washout=100)
-    >>> warmup_data = np.random.randn(3, 100)  # (input_dim, warmup_length)
-    >>> predictions, states = esn.predict(warmup_data, steps=1000)
     """
 
     __slots__ = (
